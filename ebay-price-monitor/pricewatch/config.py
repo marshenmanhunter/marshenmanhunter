@@ -181,7 +181,8 @@ def load_config(path: str | Path) -> AppConfig:
             f"config file not found: {path}\n"
             "Copy config.example.yaml to config.yaml and edit it."
         )
-    data = yaml.safe_load(path.read_text()) or {}
+    # utf-8-sig: Windows defaults to a legacy encoding, and some editors add a BOM.
+    data = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
     ebay = data.get("ebay") or {}
     notify = data.get("notify") or {}
     defaults = data.get("defaults") or {}

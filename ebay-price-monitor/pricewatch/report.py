@@ -113,7 +113,7 @@ SOLD_FOOTNOTE = (
 
 def export_csv(store: Store, items: list[ItemConfig], path: str | Path) -> int:
     count = 0
-    with open(path, "w", newline="") as fh:
+    with open(path, "w", newline="", encoding="utf-8-sig") as fh:  # BOM so Excel reads UTF-8
         w = csv.writer(fh)
         w.writerow(["item", "ts", "total_available", "sample_size", "complete", "median", "p10", "p25", "p75", "p90", "min", "max"])
         for item in items:

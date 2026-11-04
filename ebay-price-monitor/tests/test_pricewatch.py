@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -224,6 +226,27 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(item.deal_pct, 0.3)
         with self.assertRaises(ValueError):
             build_item({}, {"name": "X", "query": "x", "deal_pct_typo": 1})
+
+
+class OutputEncodingTest(unittest.TestCase):
+    """Windows writes redirected output in cp1252, which has no sparkline characters."""
+
+    def test_demo_survives_legacy_encoding(self):
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, PYTHONIOENCODING="cp1252")
+            db = os.path.join(tmp, "d.db")
+            proc = subprocess.run([sys.executable, "-m", "pricewatch", "demo", "--db", db, "--days", "3"],
+                                  cwd=here, env=env, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+            self.assertIn("daily median", proc.stdout.decode("utf-8"))
+
+    def test_config_with_bom_and_unicode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "c.yaml")
+            with open(path, "w", encoding="utf-8-sig") as fh:
+                fh.write("items:\n  - name: Pokémon Booster Box\n    query: pokemon booster box\n")
+            self.assertEqual(load_config(path).items[0].name, "Pokémon Booster Box")
 
 
 class FakeResp:

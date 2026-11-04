@@ -142,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_config(sp)
     sp.add_argument("--show-excluded", action="store_true", help="list every filtered-out listing and why")
     sp.add_argument("--no-notify", action="store_true", help="print only, send no alerts")
+    sp.add_argument("--log", help="append output to this file instead of the screen (for scheduled runs)")
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("loop", help="scan forever on a fixed interval")
@@ -149,6 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--every", type=int, default=60, help="minutes between scans (default 60)")
     sp.add_argument("--show-excluded", action="store_true")
     sp.add_argument("--no-notify", action="store_true")
+    sp.add_argument("--log", help="append output to this file instead of the screen")
     sp.set_defaults(func=cmd_loop)
 
     sp = sub.add_parser("report", help="price history and trend per item")
@@ -171,6 +173,19 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _setup_output(log_path: str | None) -> None:
+    """Always write UTF-8. Windows defaults to a legacy encoding that crashes on the trend
+    chart and on emoji in listing titles whenever output goes to a file."""
+    if log_path:
+        fh = open(log_path, "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = fh
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _setup_output(getattr(args, "log", None))
     return args.func(args)

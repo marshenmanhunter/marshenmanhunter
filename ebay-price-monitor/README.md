@@ -5,23 +5,347 @@ Scans eBay on a schedule for items you pick. For each item it:
 1. Tracks the market price over time: asking-price median, spread, daily trend, and a **likely-sold** price estimate.
 2. Flags listings priced well below market and pushes an alert to your phone (ntfy) or Discord.
 
-Uses the official eBay Browse API. No scraping.
+Uses the official eBay Browse API. No scraping. Runs on macOS, Windows and Linux with Python 3.9 or newer.
 
-## Try it now, no keys needed
+## Get started
 
-Works on macOS, Linux and Windows with Python 3.9 or newer.
+Pick your system. Each guide takes you from nothing to scheduled scans.
+
+- [macOS](#macos)
+- [Windows](#windows)
+- [Linux](#linux)
+
+Every guide has the same five steps:
+
+1. Install Python
+2. Download the code
+3. Run the demo (no eBay account needed)
+4. Connect to eBay and run your first real scan
+5. Schedule automatic scans
+
+---
+
+## macOS
+
+All commands go in **Terminal** (press Cmd+Space, type Terminal, press Enter).
+
+### 1. Install Python
 
 ```bash
-cd ebay-price-monitor
+python3 --version
+```
+
+If it prints `Python 3.9` or higher, go to step 2. If macOS offers to install the **Command Line Tools**, click Install, wait for it to finish, then run the command again. This also installs `git`.
+
+### 2. Download the code
+
+```bash
+mkdir -p ~/code && cd ~/code
+git clone https://github.com/marshenmanhunter/marshenmanhunter.git
+cd marshenmanhunter/ebay-price-monitor
+```
+
+Keep the project out of Desktop, Documents and Downloads. macOS blocks scheduled jobs from those folders.
+
+### 3. Run the demo
+
+```bash
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 python -m pricewatch demo
 ```
 
-On a Mac, the first `python3` command offers to install Apple's Command Line Tools if Python is missing. Accept it, or install Python from python.org or Homebrew. The virtualenv matters on Mac: Homebrew Python refuses a global `pip install`, and stock macOS has no `python` or `pip` command outside a virtualenv. Run `source .venv/bin/activate` in each new terminal before using the tool.
+You see 30 days of simulated scans, a price trend and alerts. See [what the demo shows](#what-the-demo-shows).
 
-The demo simulates 30 days of scans on a fake market (listings arrive, sell, expire, plus planted junk, scams and real deals) and runs it through the real pipeline. Sample result:
+Each time you open a new Terminal window, get back in with:
+
+```bash
+cd ~/code/marshenmanhunter/ebay-price-monitor && source .venv/bin/activate
+```
+
+### 4. Connect to eBay
+
+Get your keys first: [Get your eBay API keys](#get-your-ebay-api-keys). Then:
+
+```bash
+cp config.example.yaml config.yaml
+nano config.yaml
+```
+
+Fill in your keys and items ([how to edit the config](#edit-your-config)). In nano, save with Ctrl+O then Enter, quit with Ctrl+X. Avoid TextEdit: it swaps in curly quotes, which break the file.
+
+```bash
+python -m pricewatch check
+python -m pricewatch run --no-notify --show-excluded
+```
+
+`check` confirms your keys work. `run` does a real scan and lists every listing it threw out, so you can tune your filters.
+
+### 5. Schedule automatic scans
+
+```bash
+./scheduling/install-mac.sh            # every 60 minutes
+./scheduling/install-mac.sh 15         # or every 15 minutes (5, 10, 15, 20, 30, 60)
+tail -f pricewatch.log                 # watch results, Ctrl+C to stop watching
+```
+
+To stop: `./scheduling/install-mac.sh --uninstall`
+
+A sleeping Mac does not scan. It runs one catch-up scan when it wakes. For round-the-clock scans on a MacBook, keep it plugged in and turn on the option to prevent automatic sleep on power adapter in **System Settings > Battery > Options**.
+
+### Common problems on macOS
+
+| You see | Fix |
+|---|---|
+| `command not found: python` or `pip` | You are outside the virtualenv. Run `source .venv/bin/activate`. |
+| `externally-managed-environment` | Same cause, same fix. |
+| `Operation not permitted` in pricewatch.log | The project sits in Desktop, Documents or Downloads. Move it to `~/code` and rerun the install script. |
+| `missing eBay credentials` in pricewatch.log | Scheduled jobs ignore `export` lines. Put your keys in config.yaml. |
+
+---
+
+## Windows
+
+All commands go in **PowerShell** (press Start, type PowerShell, press Enter).
+
+### 1. Install Python
+
+Download Python from [python.org/downloads](https://www.python.org/downloads/) and run the installer. On the first screen, tick **Add python.exe to PATH**, then click Install Now.
+
+Close and reopen PowerShell, then check:
+
+```powershell
+py --version
+```
+
+It should print `Python 3.9` or higher.
+
+### 2. Download the code
+
+**Option A, no git:** on the [GitHub page](https://github.com/marshenmanhunter/marshenmanhunter), click **Code > Download ZIP**. Right-click the ZIP, choose **Extract All**, and extract to `C:\Users\<you>\code`. Then:
+
+```powershell
+cd $HOME\code\marshenmanhunter-main\ebay-price-monitor
+```
+
+**Option B, with git** (install it with `winget install Git.Git`):
+
+```powershell
+mkdir $HOME\code -Force; cd $HOME\code
+git clone https://github.com/marshenmanhunter/marshenmanhunter.git
+cd marshenmanhunter\ebay-price-monitor
+```
+
+### 3. Run the demo
+
+```powershell
+py -m venv .venv
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m pricewatch demo
+```
+
+The `Set-ExecutionPolicy` line is a one-time setting so PowerShell runs the activation script. Answer `Y` if asked.
+
+You see 30 days of simulated scans, a price trend and alerts. See [what the demo shows](#what-the-demo-shows).
+
+Each time you open a new PowerShell window, get back in with (use your folder from step 2):
+
+```powershell
+cd $HOME\code\marshenmanhunter\ebay-price-monitor; .venv\Scripts\Activate.ps1
+```
+
+### 4. Connect to eBay
+
+Get your keys first: [Get your eBay API keys](#get-your-ebay-api-keys). Then:
+
+```powershell
+copy config.example.yaml config.yaml
+notepad config.yaml
+```
+
+Fill in your keys and items ([how to edit the config](#edit-your-config)), save, close Notepad.
+
+```powershell
+python -m pricewatch check
+python -m pricewatch run --no-notify --show-excluded
+```
+
+`check` confirms your keys work. `run` does a real scan and lists every listing it threw out, so you can tune your filters.
+
+### 5. Schedule automatic scans
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scheduling\install-windows.ps1              # every 60 minutes
+powershell -ExecutionPolicy Bypass -File scheduling\install-windows.ps1 -Every 15    # or every 15 minutes
+Get-Content pricewatch.log -Wait -Tail 30                                            # watch results
+```
+
+To stop: `powershell -ExecutionPolicy Bypass -File scheduling\install-windows.ps1 -Uninstall`
+
+Scans run in the background while you are signed in, with no window popping up. A scan missed during sleep or shutdown runs once at the next chance. To keep a laptop scanning, set **Settings > System > Power > Sleep** to Never when plugged in.
+
+### Common problems on Windows
+
+| You see | Fix |
+|---|---|
+| `running scripts is disabled on this system` | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` and answer Y. |
+| `py` is not recognized | Reinstall from python.org. The `py` launcher comes with it. |
+| `python` opens the Microsoft Store | You are outside the virtualenv. Run `.venv\Scripts\Activate.ps1`. |
+| `missing eBay credentials` in pricewatch.log | Scheduled tasks ignore `$env:` variables. Put your keys in config.yaml. |
+
+---
+
+## Linux
+
+All commands go in a terminal.
+
+### 1. Install Python
+
+Most distributions ship Python 3.9 or newer. Install the virtualenv module and git:
+
+```bash
+sudo apt install python3 python3-venv git      # Debian, Ubuntu, Raspberry Pi OS
+sudo dnf install python3 git                   # Fedora
+sudo pacman -S python git                      # Arch
+```
+
+### 2. Download the code
+
+```bash
+mkdir -p ~/code && cd ~/code
+git clone https://github.com/marshenmanhunter/marshenmanhunter.git
+cd marshenmanhunter/ebay-price-monitor
+```
+
+### 3. Run the demo
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m pricewatch demo
+```
+
+You see 30 days of simulated scans, a price trend and alerts. See [what the demo shows](#what-the-demo-shows).
+
+Each time you open a new terminal, get back in with:
+
+```bash
+cd ~/code/marshenmanhunter/ebay-price-monitor && source .venv/bin/activate
+```
+
+### 4. Connect to eBay
+
+Get your keys first: [Get your eBay API keys](#get-your-ebay-api-keys). Then:
+
+```bash
+cp config.example.yaml config.yaml
+nano config.yaml
+```
+
+Fill in your keys and items ([how to edit the config](#edit-your-config)). Save with Ctrl+O then Enter, quit with Ctrl+X.
+
+```bash
+python -m pricewatch check
+python -m pricewatch run --no-notify --show-excluded
+```
+
+`check` confirms your keys work. `run` does a real scan and lists every listing it threw out, so you can tune your filters.
+
+### 5. Schedule automatic scans
+
+Open your crontab:
+
+```bash
+crontab -e
+```
+
+Add this line (every hour, on the hour). Replace `you` with your username, or run `pwd` in the project folder to get the full path:
+
+```cron
+0 * * * * cd /home/you/code/marshenmanhunter/ebay-price-monitor && .venv/bin/python -m pricewatch run --log pricewatch.log
+```
+
+For every 15 minutes, start the line with `*/15 * * * *` instead. Watch results with `tail -f pricewatch.log`.
+
+cron skips runs while the machine sleeps. A Raspberry Pi or an always-on server avoids this.
+
+### Common problems on Linux
+
+| You see | Fix |
+|---|---|
+| `ensurepip is not available` | `sudo apt install python3-venv`, delete the `.venv` folder, redo step 3. |
+| `externally-managed-environment` | You are outside the virtualenv. Run `source .venv/bin/activate`. |
+| `missing eBay credentials` in pricewatch.log | cron ignores `export` lines. Put your keys in config.yaml. |
+
+---
+
+## Get your eBay API keys
+
+Same on every system. Free.
+
+1. Sign up at [developer.ebay.com](https://developer.ebay.com) and sign in.
+2. Open **Application Keys** and create a **Production** keyset (not Sandbox, which holds fake data).
+3. eBay asks how your app handles **Marketplace Account Deletion** notifications. You either set up a notification endpoint or claim an exemption. This tool stores no buyer or seller personal data (only item ID, title, URL, condition and price), which fits the exemption. Read eBay's wording and decide for yourself.
+4. Copy the **App ID** (this is your `client_id`) and **Cert ID** (your `client_secret`) into config.yaml.
+
+config.yaml is git-ignored, so your keys never get committed. For one-off runs you can instead set `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` as environment variables. Scheduled scans only read config.yaml.
+
+## Edit your config
+
+config.yaml has four parts. The example file explains every setting in comments.
+
+```yaml
+ebay:
+  marketplace: EBAY_US                     # EBAY_GB, EBAY_DE, EBAY_CA, EBAY_AU, ...
+  client_id: YourApp-PRD-xxxxxxxx-xxxxxxxx
+  client_secret: PRD-xxxxxxxxxxxx-xxxx-xxxx
+  ship_to: {country: US, zip: "10001"}     # your location, for real shipping costs
+
+notify:
+  ntfy_topic: pricewatch-k3j9x2            # see Phone alerts below
+  discord_webhook: ""
+
+defaults:
+  deal_pct: 0.20                           # alert at 20% below the likely-sold price
+
+items:
+  - name: Steam Deck OLED 512GB
+    query: steam deck oled 512gb           # what you would type in eBay's search box
+    require_words: [oled, 512]             # title must contain all of these
+    exclude_words: [carrying case, skin, lcd]  # title must contain none of these
+    condition_ids: [3000]                  # 3000 = used. Track new and used as separate items
+    min_price: 150
+    max_price: 900
+```
+
+Rules of thumb for items:
+
+- Make the query specific. "steam deck oled 512gb" beats "steam deck".
+- Put the model number in `require_words` and sibling models in `exclude_words`.
+- Track new and used as two items. They are different markets.
+- Set `min_price` above accessory prices and `max_price` above the new price.
+
+## Phone alerts
+
+**ntfy** (free, no account):
+
+1. Install the ntfy app from the Google Play Store or Apple App Store.
+2. Tap + and subscribe to a topic name nobody would guess, such as `pricewatch-k3j9x2`. Anyone who knows the name sees your alerts.
+3. Put the same name in `notify.ntfy_topic`.
+
+**Discord:** in your server, open **Server Settings > Integrations > Webhooks**, create a webhook, copy its URL into `notify.discord_webhook`.
+
+Alerts show price, discount, seller feedback and a link that opens the listing.
+
+---
+
+## What the demo shows
+
+The demo simulates 30 days of scans on a fake market (listings arrive, sell and expire, plus planted junk, scams and real deals) and runs it through the real pipeline. Sample result:
 
 ```
 asking   median $481.55  middle half $449.81 to $514.56  (n=224)
@@ -52,65 +376,26 @@ The asking median is 17% above what items sell for. The likely-sold estimate lan
 
 Run with `--show-excluded` to audit what got dropped and why.
 
-## Setup for real data
-
-1. Create a free account at [developer.ebay.com](https://developer.ebay.com).
-2. Create a **Production** keyset. You get an App ID (client ID) and Cert ID (client secret).
-3. eBay requires production keysets to handle Marketplace Account Deletion notifications or claim an exemption. This tool stores no buyer or seller personal data (only item ID, title, URL, condition, price), which matches the exemption. Read eBay's wording and decide for yourself.
-4. Configure:
-
-```bash
-cp config.example.yaml config.yaml          # edit items, filters, alert channels
-export EBAY_CLIENT_ID="YourApp-PRD-..."
-export EBAY_CLIENT_SECRET="PRD-..."
-python -m pricewatch check                  # verifies keys with one search
-python -m pricewatch run --no-notify --show-excluded   # first scan, tune filters
-```
-
-5. Alerts: install the free [ntfy](https://ntfy.sh) app, subscribe to a hard-to-guess topic, put that topic in `notify.ntfy_topic`. Or paste a Discord webhook URL.
-
 ## Commands
+
+Same on every system, inside the activated virtualenv.
 
 | Command | What it does |
 |---|---|
 | `python -m pricewatch run` | One scan of every item. Prints stats and outliers, sends alerts. |
 | `python -m pricewatch run --item deck` | One item only (matches part of the name). |
-| `python -m pricewatch loop --every 60` | Scan every 60 minutes until Ctrl+C. |
-| `python -m pricewatch report` | Trend per item: daily median sparkline, 1d/7d/30d change, likely-sold median, cheapest listings. |
-| `python -m pricewatch report --csv prices.csv` | Export every scan for charting in a spreadsheet. |
-| `python -m pricewatch check` | Test credentials. |
+| `python -m pricewatch run --log pricewatch.log` | Same, output appended to a file. |
+| `python -m pricewatch loop --every 60` | Scan every 60 minutes until Ctrl+C. Simple alternative to step 5. |
+| `python -m pricewatch report` | Trend per item: daily median chart, 1d/7d/30d change, likely-sold median, cheapest listings. |
+| `python -m pricewatch report --csv prices.csv` | Export every scan for a spreadsheet. |
+| `python -m pricewatch check` | Test your keys. |
 | `python -m pricewatch demo` | Fake-market simulation. |
 
-## Scheduling
+## How often to scan
 
-`loop` works while a terminal stays open. For set-and-forget, use your OS scheduler. Scheduled jobs do not see `export` lines from your shell, so put `client_id` and `client_secret` in `config.yaml` (git-ignored).
+Hourly suits most items. Faster scans catch deals sooner and sharpen the likely-sold estimate. Underpriced listings on popular items sell within minutes because resellers run alert tools too, so scan those every 5 to 15 minutes.
 
-**macOS:** one command sets up a launchd job:
-
-```bash
-./scheduling/install-mac.sh          # hourly. Pass 15 for every 15 minutes
-./scheduling/install-mac.sh --uninstall
-```
-
-Mac rules:
-
-- Keep the project outside Desktop, Documents and Downloads. macOS blocks background jobs from those folders. `~/code/ebay-price-monitor` works.
-- A sleeping Mac does not scan. launchd runs one catch-up scan on wake. cron skips missed runs entirely, which is why the script uses launchd.
-- For round-the-clock scans on a MacBook, keep it plugged in and turn on the power adapter option to prevent automatic sleep in System Settings > Battery > Options.
-
-**Linux:** cron:
-
-```cron
-0 * * * * cd /path/to/ebay-price-monitor && .venv/bin/python -m pricewatch run >> pricewatch.log 2>&1
-```
-
-**Windows:** Task Scheduler, hourly, program `.venv\Scripts\python.exe`, arguments `-m pricewatch run`, start in this folder.
-
-A $5/month VPS or a Raspberry Pi keeps scans running when your computer is off.
-
-Hourly is the sweet spot. Faster scans catch deals sooner and sharpen the likely-sold estimate. Slower scans miss listings that sell in under an hour.
-
-**API budget:** the Browse API allows 5,000 calls per day by default. One scan costs 1 call per 200 listings, plus 1 extra call when a search has more listings than `max_pages` covers. 10 items x 3 pages x 24 scans = 720 calls per day.
+**API budget:** the Browse API allows 5,000 calls per day by default. One scan costs 1 call per 200 listings, plus 1 extra call when a search has more listings than `max_pages` covers. 10 items x 3 pages x 24 scans = 720 calls per day. One item every 5 minutes = 288 calls per day.
 
 ## How a listing becomes an alert
 
@@ -144,6 +429,7 @@ pricewatch/
   demo.py      fake market simulator
   cli.py       commands
 scheduling/
-  install-mac.sh   launchd job installer for macOS
-tests/         python -m unittest discover -s tests
+  install-mac.sh        launchd job for macOS
+  install-windows.ps1   Task Scheduler job for Windows
+tests/                  python -m unittest discover -s tests
 ```
