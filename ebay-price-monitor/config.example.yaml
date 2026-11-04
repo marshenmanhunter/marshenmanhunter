@@ -1,0 +1,54 @@
+# Copy to config.yaml and edit. config.yaml is git-ignored so your keys stay local.
+
+ebay:
+  marketplace: EBAY_US          # EBAY_GB, EBAY_DE, EBAY_CA, EBAY_AU, ...
+  # Prefer env vars EBAY_CLIENT_ID and EBAY_CLIENT_SECRET over writing keys here.
+  # client_id: YourApp-PRD-xxxxxxxx-xxxxxxxx      # "App ID" on developer.ebay.com
+  # client_secret: PRD-xxxxxxxxxxxx-xxxx-xxxx     # "Cert ID"
+  # Your location, so eBay quotes real shipping costs to you:
+  # ship_to: {country: US, zip: "10001"}
+
+database: pricewatch.db         # relative to this file
+
+notify:
+  # Phone push, free, no account: install the ntfy app, subscribe to a hard-to-guess topic name.
+  ntfy_topic: ""                # e.g. pricewatch-k3j9x2
+  discord_webhook: ""           # Server settings > Integrations > Webhooks > Copy URL
+
+# Applies to every item. Any item can override any of these.
+defaults:
+  buying_options: [FIXED_PRICE] # add AUCTION to include auctions (current bids are not final prices)
+  max_pages: 3                  # 200 listings per page. Raise it if you see "only N were fetched"
+  include_shipping: true        # compare price + shipping
+  min_sample: 10                # skip stats when fewer clean listings exist
+  deal_pct: 0.20                # flag listings at least 20% below the baseline...
+  deal_min_z: 2.0               # ...and at least 2 robust standard deviations below it
+  suspicious_pct: 0.55          # 55%+ below = too good to be true, held back as "check carefully"
+  min_seller_score: 5           # sellers below this feedback count get held back
+  min_seller_pct: 95.0
+  baseline: auto                # auto = alert vs likely-sold prices once known. asking = alert vs asking prices now
+  sold_window_days: 14
+  sold_min_sample: 8
+  notify_suspicious: false
+  exclude_words: []             # added to the built-in junk list (for parts, box only, broken, as is, ...)
+
+items:
+  - name: Steam Deck OLED 512GB
+    query: steam deck oled 512gb
+    require_words: [oled, 512]  # title must contain all of these (plain substring match)
+    exclude_words: [carrying case, skin, screen protector, dock only, lcd]
+    condition_ids: [3000]       # 3000 Used. Track new and used as separate items
+    min_price: 150
+    max_price: 900
+    # category_id: "12345"      # optional. Copy the number from an eBay category page URL
+
+  - name: Sony WH-1000XM5 (used)
+    query: sony wh-1000xm5
+    require_words: [xm5]
+    exclude_words: [ear pads, earpads, cushions, xm4]
+    condition_ids: [3000]
+    min_price: 80
+
+# eBay condition IDs:
+#   1000 New | 1500 New other / open box | 2000 Certified refurbished | 2500 Seller refurbished
+#   2750 Like new | 3000 Used | 4000 Very good | 5000 Good | 6000 Acceptable | 7000 For parts (always excluded)
