@@ -9,10 +9,17 @@ Uses the official eBay Browse API. No scraping.
 
 ## Try it now, no keys needed
 
+Works on macOS, Linux and Windows with Python 3.9 or newer.
+
 ```bash
+cd ebay-price-monitor
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python -m pricewatch demo
 ```
+
+On a Mac, the first `python3` command offers to install Apple's Command Line Tools if Python is missing. Accept it, or install Python from python.org or Homebrew. The virtualenv matters on Mac: Homebrew Python refuses a global `pip install`, and stock macOS has no `python` or `pip` command outside a virtualenv. Run `source .venv/bin/activate` in each new terminal before using the tool.
 
 The demo simulates 30 days of scans on a fake market (listings arrive, sell, expire, plus planted junk, scams and real deals) and runs it through the real pipeline. Sample result:
 
@@ -76,13 +83,30 @@ python -m pricewatch run --no-notify --show-excluded   # first scan, tune filter
 
 ## Scheduling
 
-`loop` works while your computer stays on. For a set-and-forget schedule use cron (Mac/Linux):
+`loop` works while a terminal stays open. For set-and-forget, use your OS scheduler. Scheduled jobs do not see `export` lines from your shell, so put `client_id` and `client_secret` in `config.yaml` (git-ignored).
 
-```cron
-0 * * * * cd /path/to/ebay-price-monitor && EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... /usr/bin/python3 -m pricewatch run >> pricewatch.log 2>&1
+**macOS:** one command sets up a launchd job:
+
+```bash
+./scheduling/install-mac.sh          # hourly. Pass 15 for every 15 minutes
+./scheduling/install-mac.sh --uninstall
 ```
 
-On Windows, Task Scheduler running `python -m pricewatch run` hourly in this folder does the same. A $5/month VPS or a Raspberry Pi keeps it running when your laptop sleeps.
+Mac rules:
+
+- Keep the project outside Desktop, Documents and Downloads. macOS blocks background jobs from those folders. `~/code/ebay-price-monitor` works.
+- A sleeping Mac does not scan. launchd runs one catch-up scan on wake. cron skips missed runs entirely, which is why the script uses launchd.
+- For round-the-clock scans on a MacBook, keep it plugged in and turn on the power adapter option to prevent automatic sleep in System Settings > Battery > Options.
+
+**Linux:** cron:
+
+```cron
+0 * * * * cd /path/to/ebay-price-monitor && .venv/bin/python -m pricewatch run >> pricewatch.log 2>&1
+```
+
+**Windows:** Task Scheduler, hourly, program `.venv\Scripts\python.exe`, arguments `-m pricewatch run`, start in this folder.
+
+A $5/month VPS or a Raspberry Pi keeps scans running when your computer is off.
 
 Hourly is the sweet spot. Faster scans catch deals sooner and sharpen the likely-sold estimate. Slower scans miss listings that sell in under an hour.
 
@@ -119,5 +143,7 @@ pricewatch/
   report.py    terminal output, CSV export
   demo.py      fake market simulator
   cli.py       commands
+scheduling/
+  install-mac.sh   launchd job installer for macOS
 tests/         python -m unittest discover -s tests
 ```
