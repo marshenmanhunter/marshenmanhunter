@@ -524,12 +524,12 @@ const CADENCE = { weekly: 'Weekly', biweekly: 'Every 2 weeks', monthly: 'Monthly
 const PER_MONTH = { weekly: 52 / 12, biweekly: 26 / 12, monthly: 1, yearly: 1 / 12 };
 function defaultSettings() {
   return { v: 2, sample: false, currency: 'USD', groups: structuredClone(DEFAULT_GROUPS), categories: structuredClone(DEFAULT_CATS), accounts: [], budgets: {}, goals: [], recurring: [], rules: [],
-    household: { enabled: false, partnerName: '', split: 50 }, smoothing: { enabled: false, startBuffer: 0, window: 12, start: null }, trials: {}, payoff: { strategy: 'avalanche', extra: 0 }, pool: { enabled: false, ids: null } };
+    household: { enabled: false, partnerName: '', split: 50 }, smoothing: { enabled: false, startBuffer: 0, window: 12, start: null }, trials: {}, payoff: { strategy: 'avalanche', extra: 0 }, pool: { enabled: false, ids: null }, bank: { autoSync: true, lastSync: null, links: {}, found: [], messages: [], lastError: null } };
 }
 function normalizeSettings(s) {
   const d = defaultSettings();
   for (const k of Object.keys(d)) if (s[k] == null) s[k] = d[k];
-  for (const k of ['household', 'smoothing', 'payoff', 'pool']) s[k] = { ...d[k], ...s[k] };
+  for (const k of ['household', 'smoothing', 'payoff', 'pool', 'bank']) s[k] = { ...d[k], ...s[k] };
   if (!s.groups.some(g => g.id === 'transfers')) s.groups.push({ id: 'transfers', name: 'Transfers', type: 'transfer' });
   for (const c of DEFAULT_CATS) if (LOCKED.has(c.id) && !s.categories.some(x => x.id === c.id)) s.categories.push({ ...c });
   if (!s.categories.some(c => 'essential' in c)) for (const c of s.categories) c.essential = ESSENTIAL.has(c.id);
@@ -685,6 +685,7 @@ async function boot() {
   } catch (e) { Store.kind = 'memory'; }
   S.phase = S.settings ? 'ready' : 'empty';
   reindex(); renderStatus(); render();
+  if (Bank.supported()) Bank.refreshStatus().then(() => { render(); maybeAutoSync(); });
 }
 function renderStatus() {
   const el = document.getElementById('save-status');
@@ -695,6 +696,155 @@ function applyHide() {
   document.body.classList.toggle('hide', S.hide);
   const b = document.getElementById('hide-btn');
   b.innerHTML = ic(S.hide ? 'eyeoff' : 'eye'); b.setAttribute('aria-pressed', S.hide); b.title = S.hide ? 'Show amounts' : 'Hide amounts'; b.setAttribute('aria-label', b.title);
+}
+
+/* ---------- bank sync (SimpleFIN) ---------- */
+// SimpleFIN Bridge reads balances and transactions from your banks. It cannot move money.
+// The access key never goes into settings or backups: the desktop app keeps it encrypted on disk,
+// the web and iPhone versions keep it in this device's local storage. The Claude page cannot reach outside services.
+const SFIN_KEY = 'keel-sfin-access';
+const SFIN_CREATE = 'https://beta-bridge.simplefin.org/simplefin/create';
+const inClaude = () => !!(window.claude && typeof window.claude.use === 'function');
+function sfinDecodeToken(token) {
+  const clean = String(token || '').replace(/\s+/g, ''); let url;
+  try { url = atob(clean); } catch (e) { return null; }
+  return /^https:\/\/\S+$/.test(url) ? url : null;
+}
+function sfinSplitAccess(access) {
+  const u = new URL(access);
+  if (u.protocol !== 'https:' || !u.username) throw new Error('bad access url');
+  const auth = 'Basic ' + btoa(decodeURIComponent(u.username) + ':' + decodeURIComponent(u.password));
+  u.username = ''; u.password = '';
+  return { base: u.toString().replace(/\/$/, ''), auth };
+}
+async function sfinClaim(token, save) {
+  const url = sfinDecodeToken(token);
+  if (!url) return { ok: false, message: 'That does not look like a SimpleFIN setup token. Copy the whole token from SimpleFIN and paste it again.' };
+  let res; try { res = await fetch(url, { method: 'POST' }); } catch (e) { return { ok: false, message: 'Could not reach SimpleFIN. Check your internet connection.' }; }
+  if (res.status === 403) return { ok: false, status: 403, message: 'SimpleFIN refused this token. It was already used or is wrong. If you did not use it yourself, someone else may have: turn it off at SimpleFIN and create a new one.' };
+  if (!res.ok) return { ok: false, status: res.status, message: 'SimpleFIN returned an error (' + res.status + '). Try again in a few minutes.' };
+  const access = (await res.text()).trim();
+  try { sfinSplitAccess(access); } catch (e) { return { ok: false, message: 'SimpleFIN sent back something unexpected. Create a new token and try again.' }; }
+  save(access); return { ok: true };
+}
+async function sfinAccounts(access, p) {
+  let parts; try { parts = sfinSplitAccess(access); } catch (e) { return { ok: false, message: 'The saved connection is damaged. Disconnect and connect again.' }; }
+  const q = new URLSearchParams(); if (p.startDate) q.set('start-date', String(p.startDate)); if (p.balancesOnly) q.set('balances-only', '1'); q.set('pending', '1');
+  let res; try { res = await fetch(parts.base + '/accounts?' + q, { headers: { Authorization: parts.auth } }); } catch (e) { return { ok: false, message: 'Could not reach SimpleFIN. Check your internet connection.' }; }
+  if (res.status === 403) return { ok: false, status: 403, message: 'SimpleFIN no longer accepts this connection. Disconnect, then connect again with a new token.' };
+  if (res.status === 402) return { ok: false, status: 402, message: 'Your SimpleFIN subscription needs payment. Renew it at SimpleFIN, then sync again.' };
+  if (!res.ok) return { ok: false, status: res.status, message: 'SimpleFIN returned an error (' + res.status + '). Try again later.' };
+  try { return { ok: true, data: await res.json() }; } catch (e) { return { ok: false, message: 'SimpleFIN sent data Keel could not read.' }; }
+}
+const Bank = {
+  busy: false, connected: false, lastData: null, lastStart: 0,
+  native() { return !!(window.keelNative && window.keelNative.bank); },
+  supported() { return this.native() || !inClaude(); },
+  async refreshStatus() {
+    if (!this.supported()) this.connected = false;
+    else if (this.native()) { try { this.connected = !!(await window.keelNative.bank.status()).connected; } catch (e) { this.connected = false; } }
+    else { try { this.connected = !!localStorage.getItem(SFIN_KEY); } catch (e) { this.connected = false; } }
+    return this.connected;
+  },
+  claim(token) { return this.native() ? window.keelNative.bank.claim(String(token)) : sfinClaim(token, url => localStorage.setItem(SFIN_KEY, url)); },
+  accounts(p) {
+    if (this.native()) return window.keelNative.bank.accounts(p);
+    let access = null; try { access = localStorage.getItem(SFIN_KEY); } catch (e) {}
+    return access ? sfinAccounts(access, p) : Promise.resolve({ ok: false, message: 'Not connected.' });
+  },
+  async disconnect() { if (this.native()) await window.keelNative.bank.disconnect(); else { try { localStorage.removeItem(SFIN_KEY); } catch (e) {} } this.connected = false; this.lastData = null; }
+};
+// Merchant category codes the banks attach, mapped to Keel's default categories.
+const MCC = {};
+[[['5411', '5422', '5441', '5451', '5462', '5499', '5300'], 'groceries'], [['5812', '5813', '5814'], 'dining'], [['5541', '5542', '5983', '5172'], 'gas'],
+ [['4111', '4112', '4121', '4131', '4784', '4789', '7523'], 'transit'], [['4812', '4814', '4816'], 'phone'], [['4899', '5815', '5817', '5818'], 'subs'], [['4900'], 'utilities'],
+ [['5310', '5311', '5331', '5399', '5651', '5691', '5699', '5732', '5734', '5942', '5945', '5964', '5999', '5661', '5941', '5947'], 'shopping'],
+ [['5816', '7832', '7841', '7922', '7929', '7932', '7933', '7941', '7996', '7999'], 'fun'], [['5912', '7997', '8011', '8021', '8031', '8041', '8042', '8043', '8049', '8050', '8062', '8071', '8099'], 'health'],
+ [['7230', '7297', '7298'], 'personal'], [['4411', '4511', '4722', '7011', '7012', '7512', '7519'], 'travel'], [['5200', '5211', '5251', '5261', '5712', '5719', '5722', '7349'], 'home'],
+ [['6300', '6381'], 'insurance'], [['8398', '8661', '5992'], 'gifts'], [['6012', '6011'], 'fees']].forEach(([codes, cat]) => codes.forEach(c => { MCC[c] = cat; }));
+function mccCat(code) {
+  const n = String(code || ''); let cat = MCC[n];
+  if (!cat && /^3\d{3}$/.test(n)) cat = 'travel'; // airlines, car rentals and hotels
+  return cat && IX.cats.has(cat) ? cat : null;
+}
+const sfinKey = a => String((a.org && (a.org.id || a.org.domain)) || a.conn_id || 'sfin') + ':' + a.id;
+function guessType(name) {
+  const n = String(name).toLowerCase();
+  if (/credit|card|visa|mastercard|amex|discover/.test(n)) return 'credit';
+  if (/saving|money market|mmkt|cd\b/.test(n)) return 'savings';
+  if (/loan|mortgage|heloc|auto/.test(n)) return 'loan';
+  if (/401|ira|roth|brokerage|invest|403b|529|hsa/.test(n)) return 'investment';
+  return 'checking';
+}
+const epochDate = s => fmtD(new Date(s * 1000));
+function bankAccountInfo(sa) { return { key: sfinKey(sa), name: String(sa.name || 'Account').slice(0, 80), org: String((sa.org && sa.org.name) || '').slice(0, 60), balance: parseFloat(sa.balance) || 0 }; }
+// Merge one SimpleFIN response into Keel. Keeps your own categories, notes and splits on synced transactions.
+function applyBankData(data, start) {
+  const b = S.settings.bank, links = { ...b.links }, found = [], nowSec = Math.floor(Date.now() / 1000), touched = new Set(['settings']), addedIds = [];
+  let added = 0, updated = 0, removed = 0;
+  const msgs = (Array.isArray(data.errlist) ? data.errlist.map(e => e && e.msg) : []).concat(Array.isArray(data.errors) ? data.errors : [])
+    .filter(m => typeof m === 'string' && !/recommended range/i.test(m)).map(m => m.slice(0, 200)).slice(0, 5);
+  for (const sa of Array.isArray(data.accounts) ? data.accounts : []) {
+    const info = bankAccountInfo(sa), link = links[info.key];
+    if (link === 'skip') continue;
+    const ka = link && S.settings.accounts.find(a => a.id === link);
+    if (!ka) { delete links[info.key]; found.push(info); continue; }
+    let bal = parseFloat(sa.balance);
+    if (!isNaN(bal)) { if (isLiab(ka) && bal > 0) bal = -bal; ka.balance = round2(bal); touchBalance(ka); }
+    ka.syncedAt = new Date().toISOString();
+    const existing = IX.all.filter(t => t.accountId === ka.id), byExt = new Map(existing.filter(t => t.extId).map(t => [t.extId, t])), seen = new Set();
+    for (const st of Array.isArray(sa.transactions) ? sa.transactions : []) {
+      const amount = round2(parseFloat(st.amount)); if (isNaN(amount) || st.id == null) continue;
+      const extId = info.key + ':' + st.id; seen.add(extId);
+      const date = epochDate(+st.transacted_at || +st.posted || nowSec), pend = !!st.pending || !+st.posted;
+      const cur = byExt.get(extId);
+      if (cur) {
+        if (cur.amount !== amount || cur.date !== date || !!cur.pending !== pend) {
+          touched.add('m-' + removeTx(cur)); cur.amount = amount; cur.date = date; if (pend) cur.pending = true; else delete cur.pending; touched.add('m-' + insertTx(cur)); updated++;
+        }
+        continue;
+      }
+      const manual = existing.find(t => !t.extId && Math.abs(t.amount - amount) < 0.005 && Math.abs(daysBetween(t.date, date)) <= 3);
+      if (manual) { manual.extId = extId; if (pend) manual.pending = true; touched.add('m-' + manual.date.slice(0, 7)); updated++; continue; }
+      const merchant = String(st.payee || st.description || 'Bank transaction').replace(/\s+/g, ' ').trim().slice(0, 120);
+      const rule = ruleFor(merchant) || (st.description ? ruleFor(st.description) : null);
+      const t = { id: newId('t'), date, merchant, amount, categoryId: rule ? rule.categoryId : (mccCat(st.mcc) || 'uncat'), accountId: ka.id, notes: '', extId };
+      if (pend) t.pending = true;
+      touched.add('m-' + insertTx(t)); addedIds.push(t.id); added++;
+    }
+    // Pending charges that vanished posted under a new id or were cancelled. Carry your edits to the posted one.
+    const startDate = epochDate(start);
+    for (const t of existing) {
+      if (!t.pending || !t.extId || !t.extId.startsWith(info.key + ':') || seen.has(t.extId) || t.date < startDate) continue;
+      const repl = addedIds.map(findTx).find(n => n && n.accountId === ka.id && !n.pending && Math.abs(daysBetween(t.date, n.date)) <= 7 && Math.abs(n.amount - t.amount) <= Math.max(1, Math.abs(t.amount) * 0.25));
+      if (repl) { if (t.categoryId !== 'uncat') repl.categoryId = t.categoryId; for (const k of ['notes', 'shared', 'paidBy', 'reimb']) if (t[k]) repl[k] = t[k]; }
+      touched.add('m-' + removeTx(t)); removed++;
+    }
+  }
+  S.settings.bank = { ...b, links, found, lastSync: new Date().toISOString(), lastError: null, messages: msgs };
+  changed(...touched);
+  return { added, updated, removed, found: found.length };
+}
+async function syncBank(manual) {
+  if (Bank.busy || !S.settings || S.readOnly || !Bank.connected) return;
+  Bank.busy = true; render();
+  const b = S.settings.bank, nowSec = Math.floor(Date.now() / 1000), last = b.lastSync ? Math.floor(Date.parse(b.lastSync) / 1000) : 0;
+  const start = Math.max(nowSec - 45 * 86400, last ? last - 7 * 86400 : 0);
+  let r; try { r = await Bank.accounts({ startDate: start }); } catch (e) { r = { ok: false, message: 'Bank sync failed. Try again later.' }; }
+  Bank.busy = false;
+  if (!r.ok) { S.settings.bank = { ...S.settings.bank, lastError: r.message, lastErrorAt: new Date().toISOString() }; changed('settings'); if (manual) toast(r.message); return; }
+  Bank.lastData = r.data; Bank.lastStart = start;
+  const n = applyBankData(r.data, start);
+  if (manual || n.added || n.found) toast(n.found ? `Found ${n.found} bank account${n.found === 1 ? '' : 's'}. Match ${n.found === 1 ? 'it' : 'them'} on the Accounts page.` : `Bank synced. ${n.added} new, ${n.updated} updated.`);
+}
+function maybeAutoSync() {
+  if (S.phase !== 'ready' || !S.settings || !Bank.connected || Bank.busy || S.settings.sample || !S.settings.bank.autoSync) return;
+  const last = S.settings.bank.lastSync ? Date.parse(S.settings.bank.lastSync) : 0;
+  if (Date.now() - last > 4 * 3600e3) syncBank(false);
+}
+function ago(iso) {
+  if (!iso) return 'never'; const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' hr ago' : Math.round(m / 1440) + ' days ago';
 }
 
 /* ---------- data operations ---------- */
@@ -972,6 +1122,9 @@ function attention() {
   const lg = ledger(); if (lg && Math.abs(lg.bal) >= 1) out.push({ sev: 'info', icon: 'settle-up', text: lg.bal > 0 ? `${esc(partner())} owes you ${money(lg.bal)}` : `You owe ${esc(partner())} ${money(-lg.bal)}`, sub: 'From shared costs', href: '#settle-up' });
   const rw = runway(); if (rw.ess !== null && rw.ess < 3) out.push({ sev: 'warn', icon: 'alert', text: `Emergency runway is ${months1(rw.ess)} months`, sub: 'Aim for 3 to 6 months of essential spending', href: '#forecast' });
   if (S.settings.smoothing.enabled) { const sm = smoothingState(); if (sm.months !== null && sm.months < 3) out.push({ sev: 'warn', icon: 'alert', text: `Income buffer covers ${months1(Math.max(0, sm.months))} months`, sub: 'Below the 3-month safety line', href: '#budget' }); }
+  const bk = S.settings.bank;
+  if (bk.lastError && Bank.connected) out.push({ sev: 'warn', icon: 'alert', text: 'Bank sync failed', sub: esc(bk.lastError), href: '#accounts' });
+  if ((bk.found || []).length && Bank.connected) out.push({ sev: 'info', icon: 'accounts', text: `${bk.found.length} bank account${bk.found.length === 1 ? '' : 's'} to match`, sub: 'Choose where each one goes', href: '#accounts' });
   const unc = (S.months[CUR] || []).filter(t => t.categoryId === 'uncat').length;
   if (unc) out.push({ sev: 'info', icon: 'tag', text: `${unc} uncategorized transaction${unc === 1 ? '' : 's'} this month`, sub: 'Sort them so budgets stay accurate', href: '#transactions', act: 'show-uncat' });
   return out;
@@ -1121,6 +1274,7 @@ function txTags(t) {
   if (t.shared && sharedOn()) out.push(t.paidBy === 'partner' ? `${esc(partner())} paid` : `Shared ${Math.round(myShare() * 100)}/${100 - Math.round(myShare() * 100)}`);
   if (t.reimb) out.push(t.reimb.status === 'pending' ? `Owed by ${esc(t.reimb.from)}` : t.reimb.status === 'paid' ? 'Reimbursed' : 'Not reimbursed');
   if (t.reimbFor) out.push('Pays back an expense');
+  if (t.pending) out.push('Pending');
   return out;
 }
 function txRow(t, compactRow) {
@@ -1206,10 +1360,34 @@ VIEWS.accounts = () => {
   return `<div class="wrap">${head('Accounts', accts.length + ' account' + (accts.length === 1 ? '' : 's'), btn('add-account', 'Add account', 'primary', 'plus'))}${sampleBanner()}
     <div class="tiles t3"><div class="tile"><span class="tile-label">Assets</span><span class="tile-value">${money(assets, true)}</span><span class="tile-sub">Cash, investments, property</span></div><div class="tile"><span class="tile-label">Debts</span><span class="tile-value">${money(debts, true)}</span><span class="tile-sub">Credit cards and loans</span></div><div class="tile"><span class="tile-label">Net worth</span><span class="tile-value">${money(assets - debts, true)}</span><span class="tile-sub">${deltaHtml(round2(netWorthAt(CUR) - netWorthAt(prevYm)))} since ${mShort(prevYm)}</span></div></div>
     <div class="card"><div class="card-head"><div><h2>Net worth over time</h2><p>Balances at the end of each month</p></div>${rangeSeg}</div><div class="card-body">${series.length > 1 ? chartSlot('ch-nw', { type: 'line', labels: series, lines: [{ name: 'Net worth', values: series.map(p => p.value) }], label: 'Net worth by month' }, 260) : `<div class="empty"><b>One month so far</b>Come back next month to see the trend. Each balance update adds a point.</div>`}</div></div>
+    ${bankCard()}
     ${poolCard()}
     <div class="grid g-half" style="align-items:start">${groups}</div>
     <div class="grid g-half" style="align-items:start">${rewardsCard()}${payoffCard()}</div></div>`;
 };
+function bankCard() {
+  const b = S.settings.bank;
+  if (!Bank.supported()) return `<div class="card"><div class="card-head"><div><h2>Automatic bank sync</h2><p>Pull in balances and transactions from your banks every day through SimpleFIN.</p></div></div><div class="card-body"><p class="note">Bank sync runs in the Keel apps for Mac, Windows and iPhone, and in the web version. This Claude page is not allowed to contact outside services, so it cannot connect to your bank.</p></div></div>`;
+  if (!Bank.connected) {
+    const blocked = S.settings.sample;
+    return `<div class="card"><div class="card-head"><div><h2>Connect your bank</h2><p>Keel reads balances and transactions through SimpleFIN Bridge. It cannot move money, and Keel never sees your bank password.</p></div></div><div class="card-body" style="display:flex;flex-direction:column;gap:12px">
+      ${blocked ? `<div class="banner warn"><p><b>Clear the sample data first</b> so your real accounts do not mix with the made-up household. Use the banner at the top of this page.</p></div>` : ''}
+      <ol class="steps"><li><span class="n">1</span><div><b>Create a SimpleFIN account and link your banks</b><span>Open <a href="${SFIN_CREATE}" target="_blank" rel="noopener">SimpleFIN Bridge</a>. It charges a small yearly fee.</span></div></li><li><span class="n">2</span><div><b>Create a setup token</b><span>SimpleFIN shows a long code. Copy it.</span></div></li><li><span class="n">3</span><div><b>Paste it here</b><span>Each token works once. Keel stores the connection ${Bank.native() ? 'encrypted on this computer' : 'on this device only'} and leaves it out of backups.</span></div></li></ol>
+      ${can() ? `<label class="field"><span>SimpleFIN setup token</span><textarea class="input" id="sfin-token" rows="3" placeholder="Paste the token from SimpleFIN"${blocked ? ' disabled' : ''}></textarea></label><div><button class="btn primary" data-act="bank-connect"${blocked || Bank.busy ? ' disabled' : ''}>${Bank.busy ? 'Connecting…' : 'Connect'}</button></div>` : ''}
+    </div></div>`;
+  }
+  const linked = Object.entries(b.links || {}).map(([key, id]) => ({ key, id, acct: id !== 'skip' ? S.settings.accounts.find(a => a.id === id) : null }));
+  const found = b.found || [];
+  const opts = info => { const taken = new Set(Object.values(b.links || {})); const guess = S.settings.accounts.find(a => !taken.has(a.id) && norm(a.name) && (norm(a.name).includes(norm(info.name)) || norm(info.name).includes(norm(a.name)))); return `<option value="new"${guess ? '' : ' selected'}>Create a new ${esc((ATYPES[guessType(info.name)] || ATYPES.other).label.toLowerCase())} account</option>${S.settings.accounts.filter(a => !taken.has(a.id)).map(a => `<option value="${a.id}"${guess && guess.id === a.id ? ' selected' : ''}>Use ${esc(a.name)}</option>`).join('')}<option value="skip">Do not sync this account</option>`; };
+  return `<div class="card"><div class="card-head"><div><h2>Bank sync</h2><p>Connected through SimpleFIN. Last synced ${ago(b.lastSync)}. Banks update about once a day.</p></div><div class="head-actions">${btn('bank-sync', Bank.busy ? 'Syncing…' : 'Sync now', 'sm primary', '', Bank.busy ? ' disabled' : '')}</div></div><div class="card-body" style="display:flex;flex-direction:column;gap:12px">
+    ${b.lastError ? `<div class="banner warn"><p><b>Last sync failed.</b> ${esc(b.lastError)}</p></div>` : ''}
+    ${(b.messages || []).length ? `<div class="banner warn"><p><b>Your bank says:</b> ${b.messages.map(esc).join(' ')}</p></div>` : ''}
+    ${found.length ? `<div class="fs"><b>${found.length} bank account${found.length === 1 ? '' : 's'} to match</b><p class="note">Pick where each one goes. Keel imports up to 45 days of history.</p>${found.map(f => `<div class="f3" style="grid-template-columns:minmax(0,1fr) minmax(0,1.2fr)"><div><div class="row-title">${esc(f.name)}</div><div class="row-sub">${esc(f.org)} · ${money(f.balance)}</div></div><select class="input" data-bank-link="${esc(f.key)}" aria-label="Where ${esc(f.name)} goes">${opts(f)}</select></div>`).join('')}<div>${btn('bank-link-save', 'Save and import', 'primary', '')}</div></div>` : ''}
+    ${linked.length ? `<div class="rows">${linked.map(l => `<div class="row"><div class="row-main"><div class="row-title">${l.acct ? esc(l.acct.name) : 'Not synced'}</div><div class="row-sub">${l.acct ? (l.acct.syncedAt ? 'Updated ' + ago(l.acct.syncedAt) : 'Waiting for first sync') : 'You chose to skip this bank account'}</div></div>${can() ? `<button class="btn sm quiet" data-act="bank-unlink" data-k="${esc(l.key)}">${l.acct ? 'Stop syncing' : 'Match again'}</button>` : ''}</div>`).join('')}</div>` : ''}
+    <div class="chips">${can() ? `<label class="check" style="align-items:center"><input type="checkbox" data-change="bank-auto"${b.autoSync ? ' checked' : ''}> <span>Sync on its own when Keel is open, at most every 4 hours</span></label>` : ''}</div>
+    <div>${can() ? (S.confirm === 'bank-disconnect' ? `<button class="btn quiet" data-act="cancel-confirm">Cancel</button> <button class="btn danger" data-act="bank-disconnect">Disconnect bank</button>` : `<button class="btn quiet sm" data-act="ask-bank-disconnect" style="color:var(--crit)">Disconnect</button>`) : ''} <span class="note">Disconnecting keeps every transaction already imported.</span></div>
+  </div></div>`;
+}
 function poolCard() {
   const p = S.settings.pool, on = !!p.enabled, chosen = new Set(poolChosen());
   const cashAccts = S.settings.accounts.filter(a => !isLiab(a));
@@ -1275,7 +1453,7 @@ VIEWS.transactions = () => {
     <div class="tx">${txRow(t)}<select class="input" data-change="tx-cat" data-id="${t.id}" aria-label="Category for ${esc(t.merchant)}"${can() ? '' : ' disabled'}>${catOptions(t.categoryId)}</select>${amtHtml(t)}</div>`).join('')}</div>`).join('')
     : `<div class="empty" style="padding:40px 10px"><b>${IX.all.length ? 'No matches' : 'No transactions yet'}</b>${IX.all.length ? 'Try a different search or clear the filters.' : 'Add a transaction by hand or import a CSV file from your bank.'}</div>`;
   const more = list.length > shown.length ? `<div style="display:flex;justify-content:center;padding:14px"><button class="btn" data-act="tx-more">Show ${Math.min(150, list.length - shown.length)} more</button></div>` : '';
-  const acts = btn('export-csv', 'Export', 'quiet', 'download') + btn('import', 'Import CSV', '', 'upload') + btn('add-tx', 'Add transaction', 'primary', 'plus');
+  const acts = (Bank.connected ? btn('bank-sync', Bank.busy ? 'Syncing…' : 'Sync bank', 'quiet', 'recurring', Bank.busy ? ' disabled' : '') : '') + btn('export-csv', 'Export', 'quiet', 'download') + btn('import', 'Import CSV', '', 'upload') + btn('add-tx', 'Add transaction', 'primary', 'plus');
   return `<div class="wrap">${head('Transactions', IX.all.length.toLocaleString() + ' total', acts)}${sampleBanner()}${filters}${summary}<div class="card" style="padding-bottom:6px">${body}${more}</div></div>`;
 };
 
@@ -1732,6 +1910,34 @@ document.addEventListener('click', async e => {
       S.settings.budgets = { ...S.settings.budgets, [ym]: next }; changed('settings'); toast(`Filled ${n} categor${n === 1 ? 'y' : 'ies'} from your 3-month averages.`); break;
     }
     case 'toggle-roll': { const c = S.settings.categories.find(x => x.id === id); if (c) { c.rollover = !c.rollover; c.rolloverStart = c.rollover ? S.ui.budMonth : null; changed('settings'); toast(c.rollover ? `${c.name}: leftover money now rolls into next month.` : `${c.name}: rollover off.`); } break; }
+    case 'bank-connect': {
+      const ta = document.getElementById('sfin-token'), token = ta ? ta.value : '';
+      if (!token.trim()) { toast('Paste your SimpleFIN setup token first.'); break; }
+      Bank.busy = true; render();
+      let r; try { r = await Bank.claim(token); } catch (er) { r = { ok: false, message: 'Could not connect. Try again.' }; }
+      Bank.busy = false;
+      if (!r.ok) { render(); toast(r.message); const t2 = document.getElementById('sfin-token'); if (t2) t2.value = token; break; }
+      Bank.connected = true; S.settings.bank = { ...S.settings.bank, lastSync: null, lastError: null }; changed('settings'); toast('Connected. Fetching your accounts…'); await syncBank(true); break;
+    }
+    case 'bank-sync': syncBank(true); break;
+    case 'bank-link-save': {
+      const links = { ...S.settings.bank.links };
+      for (const sel of document.querySelectorAll('[data-bank-link]')) {
+        const key = sel.dataset.bankLink, f = (S.settings.bank.found || []).find(x => x.key === key); if (!f) continue;
+        if (sel.value === 'new') {
+          const type = guessType(f.name), bal = isLiab({ type }) ? -Math.abs(f.balance) : f.balance;
+          const a = { id: newId('a'), name: f.name, type, institution: f.org, balance: round2(bal), history: {} }; touchBalance(a);
+          S.settings.accounts = [...S.settings.accounts, a]; links[key] = a.id;
+        } else links[key] = sel.value;
+      }
+      S.settings.bank = { ...S.settings.bank, links, found: [] }; reindex();
+      if (Bank.lastData) { const n = applyBankData(Bank.lastData, Bank.lastStart); toast(`Imported ${n.added} transaction${n.added === 1 ? '' : 's'}.`); }
+      else { S.settings.bank = { ...S.settings.bank, lastSync: null }; changed('settings'); syncBank(true); }
+      break;
+    }
+    case 'bank-unlink': { const links = { ...S.settings.bank.links }; const k = el.dataset.k; if (links[k] && links[k] !== 'skip') links[k] = 'skip'; else delete links[k]; S.settings.bank = { ...S.settings.bank, links }; changed('settings'); if (!links[k]) toast('It will show up to match on the next sync.'); break; }
+    case 'ask-bank-disconnect': S.confirm = 'bank-disconnect'; render(); break;
+    case 'bank-disconnect': await Bank.disconnect(); S.confirm = null; S.settings.bank = { ...S.settings.bank, lastError: null, messages: [], found: [] }; changed('settings'); toast('Bank disconnected. Your imported transactions stay.'); break;
     case 'pool-toggle': S.settings.pool = { ...S.settings.pool, enabled: !S.settings.pool.enabled }; changed('settings'); toast(S.settings.pool.enabled ? 'Cash accounts combined. Moves between them are hidden.' : 'Cash accounts are separate again.'); break;
     case 'show-internal': Object.assign(S.ui, { q: '', fAcct: 'all', fCat: 'all', fMonth: 'all', fStatus: 'internal', limit: 150 }); location.hash = '#transactions'; break;
     case 'toggle-ess': { const c = S.settings.categories.find(x => x.id === id); if (c) { c.essential = !c.essential; changed('settings'); } break; }
@@ -1798,6 +2004,7 @@ document.addEventListener('change', e => {
   if (k === 'tx-cat') { const t = findTx(el.dataset.id); if (t) { t.categoryId = el.value; changed('m-' + t.date.slice(0, 7)); } return; }
   if (k === 'budget') { const v = parseMoney(el.value); setBudget(S.ui.budMonth, el.dataset.cat, v === null ? 0 : Math.abs(v)); return; }
   if (k === 'payoff-extra') { const v = parseMoney(el.value); S.settings.payoff = { ...S.settings.payoff, extra: Math.max(0, Math.abs(v || 0)) }; changed('settings'); return; }
+  if (k === 'bank-auto') { S.settings.bank = { ...S.settings.bank, autoSync: el.checked }; changed('settings'); return; }
   if (k === 'pool-acct') { const ids = new Set(poolChosen()); if (el.checked) ids.add(el.value); else ids.delete(el.value); if (!ids.size) { el.checked = true; toast('Keep at least one account in the pot.'); return; } S.settings.pool = { ...S.settings.pool, ids: [...ids] }; changed('settings'); return; }
   if (k === 'trial-days') { S.settings.trials = { ...S.settings.trials, [el.dataset.k]: { ...(S.settings.trials[el.dataset.k] || {}), days: +el.value } }; changed('settings'); return; }
   if (k === 'restore-file') {
@@ -1947,5 +2154,7 @@ document.addEventListener('submit', e => {
 });
 
 boot();
+setInterval(maybeAutoSync, 30 * 60 * 1000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') maybeAutoSync(); });
 })();
 </script>

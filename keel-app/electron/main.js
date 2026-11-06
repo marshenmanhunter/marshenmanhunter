@@ -1,8 +1,9 @@
-// Desktop shell for Keel. The whole app lives in web/; this file only opens a window
-// and gives the page a native "Save as" dialog for exports.
+// Desktop shell for Keel. The whole app lives in web/; this file opens a window,
+// gives the page a native "Save as" dialog, and runs bank sync (see simplefin.js).
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
+const simplefin = require('./simplefin');
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
@@ -46,6 +47,11 @@ ipcMain.handle('keel:save-file', async (event, name, text) => {
   await fs.writeFile(result.filePath, String(text), 'utf8');
   return { status: 'saved' };
 });
+
+ipcMain.handle('keel:bank-status', () => simplefin.status());
+ipcMain.handle('keel:bank-claim', (event, token) => simplefin.claim(String(token || '')));
+ipcMain.handle('keel:bank-accounts', (event, p) => simplefin.accounts({ startDate: p && +p.startDate, balancesOnly: !!(p && p.balancesOnly) }));
+ipcMain.handle('keel:bank-disconnect', () => simplefin.disconnect());
 
 app.on('second-instance', () => {
   if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
