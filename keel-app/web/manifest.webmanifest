@@ -1,0 +1,15 @@
+{
+  "name": "Keel Budget",
+  "short_name": "Keel",
+  "description": "Budgets, accounts, forecasts, reimbursements and shared costs in one private app.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#EEF2EF",
+  "theme_color": "#1E5A44",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

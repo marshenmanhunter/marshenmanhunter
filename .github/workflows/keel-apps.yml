@@ -1,0 +1,50 @@
+# Builds the Keel desktop apps on real Mac and Windows machines.
+# Run it from the Actions tab (Build Keel apps, Run workflow), or push a change under keel-app/.
+# Download the results from the run's Artifacts section.
+name: Build Keel apps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'keel-app/**'
+      - '.github/workflows/keel-apps.yml'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            script: dist:mac
+            name: Keel-mac
+            files: |
+              keel-app/dist/*.dmg
+              keel-app/dist/*.zip
+          - os: windows-latest
+            script: dist:win
+            name: Keel-windows
+            files: |
+              keel-app/dist/*.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: keel-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: keel-app/package-lock.json
+      - run: npm ci
+      - run: npm run build:web
+      - run: npm run ${{ matrix.script }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error

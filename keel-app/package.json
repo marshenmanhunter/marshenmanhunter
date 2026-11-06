@@ -1,0 +1,93 @@
+{
+  "name": "keel-budget",
+  "version": "2.0.0",
+  "description": "Keel: a private budgeting app for Mac, Windows and iPhone.",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:web": "node tools/build-web.js",
+    "dist:mac": "electron-builder --mac --publish never",
+    "dist:win": "electron-builder --win --publish never",
+    "serve": "node tools/serve.js",
+    "ios:add": "cap add ios",
+    "ios:sync": "cap sync ios",
+    "ios:open": "cap open ios"
+  },
+  "keywords": [],
+  "author": "Keel",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0",
+    "@capacitor/ios": "^6.2.0",
+    "@fontsource/ibm-plex-mono": "^5.1.0",
+    "@fontsource/public-sans": "^5.1.0",
+    "@fontsource/schibsted-grotesk": "^5.1.0",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "@capacitor/core": "^6.2.0"
+  },
+  "private": true,
+  "build": {
+    "appId": "app.keel.budget",
+    "productName": "Keel",
+    "copyright": "Keel",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**",
+      "web/**",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.finance",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "identity": "-",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "Keel"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Keel",
+      "artifactName": "Keel-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Keel-Portable-${version}.${ext}"
+    }
+  }
+}

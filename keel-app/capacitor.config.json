@@ -1,0 +1,6 @@
+{
+  "appId": "app.keel.budget",
+  "appName": "Keel",
+  "webDir": "web",
+  "ios": { "contentInset": "never", "backgroundColor": "#EEF2EF" }
+}
