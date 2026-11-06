@@ -1,6 +1,6 @@
 {
   "name": "keel-budget",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Keel: a private budgeting app for Mac, Windows and iPhone.",
   "main": "electron/main.js",
   "scripts": {

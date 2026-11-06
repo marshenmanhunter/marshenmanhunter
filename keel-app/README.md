@@ -9,15 +9,15 @@ to move it to another device.
 
 ## Windows
 
-1. Download `Keel-Windows-2.0.0.zip`, or the `Keel-windows` build from GitHub Actions (see below).
+1. Download `Keel-Windows-2.1.0.zip`, or the `Keel-windows` build from GitHub Actions (see below).
 2. Unzip it anywhere, open the folder and run `Keel.exe`. The Actions build also gives you
-   `Keel-Setup-2.0.0.exe`, a normal installer with a Start menu shortcut.
+   `Keel-Setup-2.1.0.exe`, a normal installer with a Start menu shortcut.
 3. Windows shows "Windows protected your PC" because the app is not code-signed. Click
    **More info → Run anyway**. A code-signing certificate removes this warning.
 
 ## Mac
 
-1. Download the `Keel-mac` build from GitHub Actions and open `Keel-2.0.0-universal.dmg`.
+1. Download the `Keel-mac` build from GitHub Actions and open `Keel-2.1.0-universal.dmg`.
    It runs on both Apple Silicon and Intel Macs.
 2. Drag Keel into Applications.
 3. The first time, right-click Keel and choose **Open**, then **Open** again. If macOS still blocks it,

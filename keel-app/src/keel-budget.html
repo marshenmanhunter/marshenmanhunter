@@ -524,12 +524,12 @@ const CADENCE = { weekly: 'Weekly', biweekly: 'Every 2 weeks', monthly: 'Monthly
 const PER_MONTH = { weekly: 52 / 12, biweekly: 26 / 12, monthly: 1, yearly: 1 / 12 };
 function defaultSettings() {
   return { v: 2, sample: false, currency: 'USD', groups: structuredClone(DEFAULT_GROUPS), categories: structuredClone(DEFAULT_CATS), accounts: [], budgets: {}, goals: [], recurring: [], rules: [],
-    household: { enabled: false, partnerName: '', split: 50 }, smoothing: { enabled: false, startBuffer: 0, window: 12, start: null }, trials: {}, payoff: { strategy: 'avalanche', extra: 0 } };
+    household: { enabled: false, partnerName: '', split: 50 }, smoothing: { enabled: false, startBuffer: 0, window: 12, start: null }, trials: {}, payoff: { strategy: 'avalanche', extra: 0 }, pool: { enabled: false, ids: null } };
 }
 function normalizeSettings(s) {
   const d = defaultSettings();
   for (const k of Object.keys(d)) if (s[k] == null) s[k] = d[k];
-  for (const k of ['household', 'smoothing', 'payoff']) s[k] = { ...d[k], ...s[k] };
+  for (const k of ['household', 'smoothing', 'payoff', 'pool']) s[k] = { ...d[k], ...s[k] };
   if (!s.groups.some(g => g.id === 'transfers')) s.groups.push({ id: 'transfers', name: 'Transfers', type: 'transfer' });
   for (const c of DEFAULT_CATS) if (LOCKED.has(c.id) && !s.categories.some(x => x.id === c.id)) s.categories.push({ ...c });
   if (!s.categories.some(c => 'essential' in c)) for (const c of s.categories) c.essential = ESSENTIAL.has(c.id);
@@ -551,6 +551,30 @@ function reindex() {
   if (!S.settings) { IX = null; return; }
   IX = { cats: new Map(S.settings.categories.map(c => [c.id, c])), groups: new Map(S.settings.groups.map(g => [g.id, g])), accts: new Map(S.settings.accounts.map(a => [a.id, a])) };
   IX.all = Object.values(S.months).flat().sort((a, b) => b.date.localeCompare(a.date));
+  IX.pool = poolIds();
+  IX.internal = findInternalMoves(IX.pool);
+}
+// Accounts treated as one pot of cash. Defaults to every checking, savings and cash account.
+function poolIds() {
+  const p = S.settings.pool || {}; if (!p.enabled) return null;
+  const ids = p.ids && p.ids.length ? p.ids : S.settings.accounts.filter(a => LIQUID.has(a.type)).map(a => a.id);
+  return new Set(ids.filter(id => IX.accts.has(id)));
+}
+const poolChosen = () => { const p = S.settings.pool || {}; return p.ids && p.ids.length ? p.ids : S.settings.accounts.filter(a => LIQUID.has(a.type)).map(a => a.id); };
+// Money moving between two pooled accounts: same amount out of one and into another within 3 days.
+// Both sides are ignored by spending, income and the transaction list while pooling is on.
+function findInternalMoves(pool) {
+  const out = new Set(); if (!pool || pool.size < 2) return out;
+  const skip = new Set(['ccpay', 'reimb', 'settle']), ins = new Map();
+  const cand = IX.all.filter(t => pool.has(t.accountId) && !skip.has(t.categoryId) && t.amount !== 0);
+  for (const t of cand) if (t.amount > 0) { const k = Math.round(t.amount * 100); if (!ins.has(k)) ins.set(k, []); ins.get(k).push(t); }
+  for (const t of cand) {
+    if (t.amount >= 0) continue;
+    const list = ins.get(Math.round(-t.amount * 100)) || [];
+    const m = list.find(x => !out.has(x.id) && x.accountId !== t.accountId && Math.abs(daysBetween(t.date, x.date)) <= 3);
+    if (m) { out.add(t.id); out.add(m.id); }
+  }
+  return out;
 }
 const catName = id => (IX.cats.get(id) || { name: 'Uncategorized' }).name;
 const typeOf = id => { const c = IX.cats.get(id) || IX.cats.get('uncat'); const g = c && IX.groups.get(c.group); return g ? g.type : 'expense'; };
@@ -560,6 +584,7 @@ const isLiab = a => !!(ATYPES[a.type] || {}).liab;
 const partner = () => S.settings.household.partnerName || 'Partner';
 const myShare = () => (S.settings.household.split ?? 50) / 100;
 const sharedOn = () => !!S.settings.household.enabled;
+const pooled = () => !!(IX && IX.pool);
 
 /* ---------- storage ---------- */
 const LS_KEY = 'keel-budget-v1';
@@ -702,6 +727,7 @@ function monthStats(ym) {
   if (statsCache.has(ym)) return statsCache.get(ym);
   let income = 0, expense = 0; const byCat = {};
   for (const t of S.months[ym] || []) {
+    if (IX.internal.has(t.id)) continue;
     const ty = typeOf(t.categoryId); if (ty === 'transfer') continue;
     const a = eff(t);
     if (ty === 'income') income += a; else expense -= a;
@@ -888,7 +914,7 @@ function goalMonthly() {
 }
 function safeToSpend() {
   const accts = S.settings.accounts;
-  const cash = sum(accts.filter(a => a.type === 'checking' || a.type === 'cash'), a => a.balance);
+  const cash = IX.pool ? sum(accts.filter(a => IX.pool.has(a.id)), a => a.balance) : sum(accts.filter(a => a.type === 'checking' || a.type === 'cash'), a => a.balance);
   const owed = -sum(accts.filter(a => a.type === 'credit'), a => a.balance);
   const pays = S.settings.recurring.filter(r => r.amount > 0).map(r => occurrences(r, addDays(TODAY, 1), addDays(TODAY, 62))[0]).filter(Boolean).sort();
   const until = pays[0] || (CUR + '-' + pad(daysIn(CUR)));
@@ -1130,13 +1156,13 @@ VIEWS.overview = () => {
   const dayFrac = Math.min(1, new Date().getDate() / daysIn(CUR)), pace = budTotal > 0 ? st.expense / (budTotal * dayFrac) : 0;
   const paceChip = budTotal <= 0 ? '' : st.expense > budTotal ? `<span class="chip crit">${ic('alert')}Over budget</span>` : pace > 1.1 ? `<span class="chip warn">${ic('alert')}Ahead of pace</span>` : `<span class="chip ok">${ic('check')}On pace</span>`;
   const sts = safeToSpend(), rw = runway();
-  const stsExplain = explain([['Cash in checking', money(sts.cash)], ['Credit card balances', money(-sts.owed)], [`Bills due before ${dShort(sts.until)} (${sts.bills.length})`, money(-sts.billTotal)], ['Goal savings for this month', money(-sts.goals)], ['Safe to spend', money(sts.value), true]],
+  const stsExplain = explain([[pooled() ? `Combined cash (${IX.pool.size} accounts)` : 'Cash in checking', money(sts.cash)], ['Credit card balances', money(-sts.owed)], [`Bills due before ${dShort(sts.until)} (${sts.bills.length})`, money(-sts.billTotal)], ['Goal savings for this month', money(-sts.goals)], ['Safe to spend', money(sts.value), true]],
     sts.hasPay ? `Counts until your next expected income on ${dShort(sts.until)}. Shared bills count in full because you pay them up front.` : 'No recurring income is set, so this counts to the end of the month.');
   const rwExplain = explain([['Cash and savings', money(rw.liquid)], ['Essential spending per month', money(rw.av.ess)], ['All spending per month', money(rw.av.total)], ['Months at essential level', rw.ess === null ? '–' : months1(rw.ess), true]],
     `Spending is your average over the last ${rw.av.n || 0} full months. Mark which categories are essential on the Categories page.`);
   const tiles = `<div class="tiles">
     <div class="tile"><span class="tile-label">Net worth</span><div class="tile-row"><span class="tile-value">${money(nw, true)}</span>${sparkline(series.slice(-6).map(p => p.value))}</div><span class="tile-sub">${deltaHtml(round2(nw - nwPrev))} since ${mShort(prevYm)}</span></div>
-    <div class="tile"><span class="tile-label">Safe to spend</span><span class="tile-value"${sts.value < 0 ? ' style="color:var(--neg)"' : ''}>${money(sts.value, true)}</span><span class="tile-sub">Until ${dShort(sts.until)}, after bills, cards and goals</span>${stsExplain}</div>
+    <div class="tile"><span class="tile-label">Safe to spend</span><span class="tile-value"${sts.value < 0 ? ' style="color:var(--neg)"' : ''}>${money(sts.value, true)}</span><span class="tile-sub">${pooled() ? 'From all your cash accounts, until ' : 'Until '}${dShort(sts.until)}, after bills, cards and goals</span>${stsExplain}</div>
     <div class="tile"><span class="tile-label">Spent in ${mName(CUR)}</span><span class="tile-value">${money(st.expense, true)}</span><span class="tile-sub">${budTotal > 0 ? `of ${money(budTotal, true)} ${paceChip}` : 'No budget set'}</span></div>
     <div class="tile"><span class="tile-label">Emergency runway</span><span class="tile-value">${rw.ess === null ? '–' : months1(rw.ess) + ' months'}</span><span class="tile-sub">${rw.all === null ? 'Needs a month of spending history' : months1(rw.all) + ' months at your current spending'}</span>${rwExplain}</div>
   </div>`;
@@ -1147,7 +1173,7 @@ VIEWS.overview = () => {
     <div class="row stack"><div class="row-line" style="flex-wrap:nowrap"><span style="display:flex;align-items:center;gap:8px;min-width:0"><span class="row-title">${esc(x.c.name)}</span>${statusChip(x.s, x.b)}</span><span class="amt">${money(x.s, true)} <span class="muted">of ${money(x.b, true)}</span></span></div>${meterHtml(x.s, x.b)}</div>`).join('')
     : `<div class="empty"><b>No budget yet</b>Set monthly limits on the Budget page.</div>`}</div></div></div>`;
   const nwCard = `<div class="card fill"><div class="card-head"><div><h2>Net worth</h2><p>Assets minus debts at the end of each month</p></div><a class="card-link" href="#accounts">See accounts</a></div><div class="card-body">${series.length > 1 ? chartSlot('ch-nw-dash', { type: 'line', labels: series, lines: [{ name: 'Net worth', values: series.map(p => p.value) }], label: 'Net worth by month' }, 'fill') : `<div class="empty"><b>${money(nw, true)} today</b>This chart fills in month by month as your balances change.</div>`}</div></div>`;
-  const recent = IX.all.slice(0, 6);
+  const recent = IX.all.filter(t => !IX.internal.has(t.id)).slice(0, 6);
   const recentCard = `<div class="card"><div class="card-head"><h2>Recent transactions</h2><a class="card-link" href="#transactions">See all</a></div><div class="card-body"><div class="rows">${recent.length ? recent.map(t => `<div class="row"><div class="row-main">${txRow(t, true)}</div>${amtHtml(t)}</div>`).join('') : `<div class="empty"><b>No transactions yet</b>Add one or import a CSV from your bank.</div>`}</div></div></div>`;
   const to14 = addDays(TODAY, 14);
   const up = S.settings.recurring.flatMap(r => occurrences(r, TODAY, to14).map(d => ({ d, name: r.name, amount: r.amount, sub: catName(r.categoryId) })))
@@ -1180,9 +1206,23 @@ VIEWS.accounts = () => {
   return `<div class="wrap">${head('Accounts', accts.length + ' account' + (accts.length === 1 ? '' : 's'), btn('add-account', 'Add account', 'primary', 'plus'))}${sampleBanner()}
     <div class="tiles t3"><div class="tile"><span class="tile-label">Assets</span><span class="tile-value">${money(assets, true)}</span><span class="tile-sub">Cash, investments, property</span></div><div class="tile"><span class="tile-label">Debts</span><span class="tile-value">${money(debts, true)}</span><span class="tile-sub">Credit cards and loans</span></div><div class="tile"><span class="tile-label">Net worth</span><span class="tile-value">${money(assets - debts, true)}</span><span class="tile-sub">${deltaHtml(round2(netWorthAt(CUR) - netWorthAt(prevYm)))} since ${mShort(prevYm)}</span></div></div>
     <div class="card"><div class="card-head"><div><h2>Net worth over time</h2><p>Balances at the end of each month</p></div>${rangeSeg}</div><div class="card-body">${series.length > 1 ? chartSlot('ch-nw', { type: 'line', labels: series, lines: [{ name: 'Net worth', values: series.map(p => p.value) }], label: 'Net worth by month' }, 260) : `<div class="empty"><b>One month so far</b>Come back next month to see the trend. Each balance update adds a point.</div>`}</div></div>
+    ${poolCard()}
     <div class="grid g-half" style="align-items:start">${groups}</div>
     <div class="grid g-half" style="align-items:start">${rewardsCard()}${payoffCard()}</div></div>`;
 };
+function poolCard() {
+  const p = S.settings.pool, on = !!p.enabled, chosen = new Set(poolChosen());
+  const cashAccts = S.settings.accounts.filter(a => !isLiab(a));
+  if (cashAccts.length < 2) return '';
+  const total = sum(cashAccts.filter(a => chosen.has(a.id)), a => a.balance), moves = IX.internal.size / 2;
+  return `<div class="card"><div class="card-head"><div><h2>Combine my cash</h2><p>Treat these accounts as one pot of money. Moving money between them stops counting as spending or income and drops out of your transaction list.</p></div>
+    ${can() ? `<button class="btn ${on ? '' : 'primary'}" data-act="pool-toggle" aria-pressed="${on}">${on ? 'Turn off' : 'Turn on'}</button>` : ''}</div>
+    <div class="card-body" style="display:flex;flex-direction:column;gap:12px">
+      ${on ? `<div class="banner"><p><b>${money(total)}</b> across ${chosen.size} account${chosen.size === 1 ? '' : 's'}. ${moves ? `${moves} move${moves === 1 ? '' : 's'} between them hidden. <button class="card-link" data-act="show-internal">See them</button>` : 'No moves between them found yet.'}</p></div>` : ''}
+      <div class="chips">${cashAccts.map(a => `<label class="check" style="align-items:center"><input type="checkbox" data-change="pool-acct" value="${a.id}"${chosen.has(a.id) ? ' checked' : ''}${can() ? '' : ' disabled'}> <span>${esc(a.name)}</span></label>`).join('')}</div>
+      <p class="note">Safe to spend uses the combined total when this is on. A move counts when the same amount leaves one of these accounts and arrives in another within 3 days.</p>
+    </div></div>`;
+}
 function rewardsCard() {
   const rc = rewardsCheck();
   if (!rc) return `<div class="card"><div class="card-head"><div><h2>Card rewards check</h2><p>Find out which card to use for each kind of purchase</p></div></div><div class="card-body"><div class="empty"><b>No reward rates yet</b>Edit a credit card and add its rewards rate. With two or more cards, Keel shows where you are leaving money behind.</div></div></div>`;
@@ -1212,9 +1252,10 @@ function payoffCard() {
 }
 
 function filteredTx() {
+  if (S.ui.fStatus === 'internal' && !pooled()) S.ui.fStatus = 'all';
   const q = S.ui.q.trim().toLowerCase(), f = S.ui.fStatus;
-  return IX.all.filter(t => (S.ui.fMonth === 'all' || t.date.startsWith(S.ui.fMonth)) && (S.ui.fAcct === 'all' || t.accountId === S.ui.fAcct) && (S.ui.fCat === 'all' || t.categoryId === S.ui.fCat) &&
-    (f === 'all' || (f === 'uncat' && t.categoryId === 'uncat') || (f === 'shared' && t.shared) || (f === 'reimb' && t.reimb)) &&
+  return IX.all.filter(t => (f === 'internal' ? IX.internal.has(t.id) : !IX.internal.has(t.id)) && (S.ui.fMonth === 'all' || t.date.startsWith(S.ui.fMonth)) && (S.ui.fAcct === 'all' || t.accountId === S.ui.fAcct) && (S.ui.fCat === 'all' || t.categoryId === S.ui.fCat) &&
+    (f === 'all' || f === 'internal' || (f === 'uncat' && t.categoryId === 'uncat') || (f === 'shared' && t.shared) || (f === 'reimb' && t.reimb)) &&
     (!q || t.merchant.toLowerCase().includes(q) || (t.notes || '').toLowerCase().includes(q) || catName(t.categoryId).toLowerCase().includes(q) || String(Math.abs(t.amount)).includes(q)));
 }
 VIEWS.transactions = () => {
@@ -1225,7 +1266,7 @@ VIEWS.transactions = () => {
     <select class="input" id="f-month" data-change="fMonth" aria-label="Month"><option value="all">All months</option>${months.map(m => `<option value="${m}"${S.ui.fMonth === m ? ' selected' : ''}>${mLong(m)}</option>`).join('')}</select>
     <select class="input" id="f-acct" data-change="fAcct" aria-label="Account"><option value="all">All accounts</option>${S.settings.accounts.map(a => `<option value="${a.id}"${S.ui.fAcct === a.id ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
     <select class="input" id="f-cat" data-change="fCat" aria-label="Category"><option value="all">All categories</option>${catOptions(S.ui.fCat)}</select>
-    <select class="input" id="f-status" data-change="fStatus" aria-label="Type"><option value="all">All types</option>${[['uncat', 'Uncategorized'], ['shared', 'Shared with partner'], ['reimb', 'Reimbursable']].map(([v, l]) => `<option value="${v}"${S.ui.fStatus === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>`;
+    <select class="input" id="f-status" data-change="fStatus" aria-label="Type"><option value="all">All types</option>${[['uncat', 'Uncategorized'], ['shared', 'Shared with partner'], ['reimb', 'Reimbursable']].concat(pooled() ? [['internal', 'Moves between my accounts']] : []).map(([v, l]) => `<option value="${v}"${S.ui.fStatus === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>`;
   const anyFilter = S.ui.q || S.ui.fMonth !== 'all' || S.ui.fAcct !== 'all' || S.ui.fCat !== 'all' || S.ui.fStatus !== 'all';
   const summary = `<div class="tx-summary"><span><b>${list.length.toLocaleString()}</b> transactions</span><span>Income <b>${money(inc)}</b></span><span>Your spending <b>${money(exp)}</b></span>${anyFilter ? `<button class="card-link" data-act="clear-filters">Clear filters</button>` : ''}</div>`;
   const days = []; let cur = null;
@@ -1638,7 +1679,7 @@ function budgetCSV() {
 }
 
 /* ---------- events ---------- */
-const READ_OK = ['modal-close', 'nw-range', 'cf-range', 'cf-month', 'bud-prev', 'bud-next', 'bud-today', 'tx-more', 'clear-filters', 'export-csv', 'export-json', 'export-budget', 'copy-text', 'copy-request', 'cancel-confirm', 'drill', 'show-uncat', 'fc-months', 'fc-reset', 'toggle-hide'];
+const READ_OK = ['modal-close', 'nw-range', 'cf-range', 'cf-month', 'bud-prev', 'bud-next', 'bud-today', 'tx-more', 'clear-filters', 'export-csv', 'export-json', 'export-budget', 'copy-text', 'copy-request', 'cancel-confirm', 'drill', 'show-uncat', 'fc-months', 'fc-reset', 'toggle-hide', 'show-internal'];
 document.addEventListener('click', async e => {
   const el = e.target.closest('[data-act]'); if (!el) return;
   const act = el.dataset.act, id = el.dataset.id;
@@ -1691,6 +1732,8 @@ document.addEventListener('click', async e => {
       S.settings.budgets = { ...S.settings.budgets, [ym]: next }; changed('settings'); toast(`Filled ${n} categor${n === 1 ? 'y' : 'ies'} from your 3-month averages.`); break;
     }
     case 'toggle-roll': { const c = S.settings.categories.find(x => x.id === id); if (c) { c.rollover = !c.rollover; c.rolloverStart = c.rollover ? S.ui.budMonth : null; changed('settings'); toast(c.rollover ? `${c.name}: leftover money now rolls into next month.` : `${c.name}: rollover off.`); } break; }
+    case 'pool-toggle': S.settings.pool = { ...S.settings.pool, enabled: !S.settings.pool.enabled }; changed('settings'); toast(S.settings.pool.enabled ? 'Cash accounts combined. Moves between them are hidden.' : 'Cash accounts are separate again.'); break;
+    case 'show-internal': Object.assign(S.ui, { q: '', fAcct: 'all', fCat: 'all', fMonth: 'all', fStatus: 'internal', limit: 150 }); location.hash = '#transactions'; break;
     case 'toggle-ess': { const c = S.settings.categories.find(x => x.id === id); if (c) { c.essential = !c.essential; changed('settings'); } break; }
     case 'smooth-off': S.settings.smoothing = { ...S.settings.smoothing, enabled: false }; changed('settings'); break;
     case 'payoff-strategy': S.settings.payoff = { ...S.settings.payoff, strategy: el.dataset.v }; changed('settings'); break;
@@ -1755,6 +1798,7 @@ document.addEventListener('change', e => {
   if (k === 'tx-cat') { const t = findTx(el.dataset.id); if (t) { t.categoryId = el.value; changed('m-' + t.date.slice(0, 7)); } return; }
   if (k === 'budget') { const v = parseMoney(el.value); setBudget(S.ui.budMonth, el.dataset.cat, v === null ? 0 : Math.abs(v)); return; }
   if (k === 'payoff-extra') { const v = parseMoney(el.value); S.settings.payoff = { ...S.settings.payoff, extra: Math.max(0, Math.abs(v || 0)) }; changed('settings'); return; }
+  if (k === 'pool-acct') { const ids = new Set(poolChosen()); if (el.checked) ids.add(el.value); else ids.delete(el.value); if (!ids.size) { el.checked = true; toast('Keep at least one account in the pot.'); return; } S.settings.pool = { ...S.settings.pool, ids: [...ids] }; changed('settings'); return; }
   if (k === 'trial-days') { S.settings.trials = { ...S.settings.trials, [el.dataset.k]: { ...(S.settings.trials[el.dataset.k] || {}), days: +el.value } }; changed('settings'); return; }
   if (k === 'restore-file') {
     const file = el.files && el.files[0]; if (!file) return;

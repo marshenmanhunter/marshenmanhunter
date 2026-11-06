@@ -1,5 +1,5 @@
 // Offline support for the web install. Serves the app shell from cache, then refreshes it.
-const CACHE = 'keel-v2';
+const CACHE = 'keel-v3';
 const SHELL = ['./', 'index.html', 'sample.js', 'manifest.webmanifest', 'fonts/fonts.css',
   'fonts/public-sans-latin-400-normal.woff2', 'fonts/public-sans-latin-500-normal.woff2', 'fonts/public-sans-latin-600-normal.woff2', 'fonts/public-sans-latin-700-normal.woff2',
   'fonts/schibsted-grotesk-latin-500-normal.woff2', 'fonts/schibsted-grotesk-latin-600-normal.woff2', 'fonts/schibsted-grotesk-latin-700-normal.woff2', 'fonts/schibsted-grotesk-latin-800-normal.woff2',
