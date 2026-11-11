@@ -290,7 +290,25 @@ Same on every system. Free.
 1. Sign up at [developer.ebay.com](https://developer.ebay.com) and sign in.
 2. Open **Application Keys** and create a **Production** keyset (not Sandbox, which holds fake data).
 3. eBay asks how your app handles **Marketplace Account Deletion** notifications. You either set up a notification endpoint or claim an exemption. This tool stores no buyer or seller personal data (only item ID, title, URL, condition and price), which fits the exemption. Read eBay's wording and decide for yourself.
-4. Copy the **App ID** (this is your `client_id`) and **Cert ID** (your `client_secret`) into config.yaml.
+4. Copy the **App ID** (this is your `client_id`) and **Cert ID** (your `client_secret`) into config.yaml. Skip the Dev ID. This tool does not use it.
+
+In config.yaml the key lines start commented out. Delete the `# ` at the start (the hash **and** the space after it), then replace the example value. Keep the two-space indent under `ebay:`, and paste the bare key with no quotes:
+
+```yaml
+ebay:
+  marketplace: EBAY_US
+  client_id: Marshall-pricewat-PRD-1a2b3c4d5-6e7f8a9b
+  client_secret: PRD-1a2b3c4d5e6f-7a8b-9c0d-1e2f-3a4b
+```
+
+Then run `python -m pricewatch check`. It shows which keys it read, where from, and flags common mistakes before calling eBay.
+
+**If eBay says `invalid_client`:** the file is fine. eBay received your keys and rejected them. In order of likelihood:
+
+1. **Production keyset still disabled.** eBay turns it on only after the Marketplace Account Deletion step (3 above). On the Application Keys page, look for a notice next to the Production keyset and complete it.
+2. **Wrong value pasted.** App ID goes in `client_id`, Cert ID in `client_secret`.
+3. **Sandbox keys.** Copy from the Production column.
+4. **Old `export` lines.** Keys set with `export` (or `$env:` on Windows) override config.yaml. Open a new terminal window.
 
 config.yaml is git-ignored, so your keys never get committed. For one-off runs you can instead set `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` as environment variables. Scheduled scans only read config.yaml.
 

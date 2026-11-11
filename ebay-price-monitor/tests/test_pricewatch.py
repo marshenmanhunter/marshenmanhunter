@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from pricewatch.config import build_item, load_config
+from pricewatch.config import AppConfig, build_item, credential_problems, load_config, mask
 from pricewatch.ebay import EbayClient, SearchResult
 from pricewatch.listing import ListingFilter, normalize
 from pricewatch.monitor import choose_baseline, classify, run_item
@@ -228,6 +228,58 @@ class ConfigTest(unittest.TestCase):
             build_item({}, {"name": "X", "query": "x", "deal_pct_typo": 1})
 
 
+class CredentialTest(unittest.TestCase):
+    GOOD_ID = "Marshall-pricewat-PRD-1a2b3c4d5-6e7f8a9b"
+    GOOD_SECRET = "PRD-1a2b3c4d5e6f-7a8b-9c0d-1e2f-3a4b"
+
+    def probs(self, cid, sec, **kw):
+        return " | ".join(credential_problems(AppConfig(items=[], client_id=cid, client_secret=sec, **kw)))
+
+    def test_well_formed_keys_pass(self):
+        self.assertEqual(self.probs(self.GOOD_ID, self.GOOD_SECRET), "")
+
+    def test_common_mistakes(self):
+        self.assertIn("placeholder", self.probs("YourApp-PRD-xxxxxxxx-xxxxxxxx", self.GOOD_SECRET))
+        self.assertIn("Dev ID", self.probs(self.GOOD_ID, "0a1b2c3d-4e5f-6789-abcd-ef0123456789"))
+        self.assertIn("Sandbox", self.probs("Marshall-pricewat-SBX-1a2b3c4d5-6e7f8a9b", "SBX-1a2b3c4d5e6f-7a8b"))
+        self.assertEqual(self.probs("Marshall-pricewat-SBX-1a2b3c4d5-6e7f8a9b", "SBX-1a2b", sandbox=True), "")
+        self.assertIn("quotes", self.probs("\u201c" + self.GOOD_ID + "\u201d", self.GOOD_SECRET))
+        self.assertIn("identical", self.probs(self.GOOD_ID, self.GOOD_ID))
+        self.assertIn("empty", self.probs(None, self.GOOD_SECRET))
+
+    def test_env_var_overrides_file_and_is_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "c.yaml")
+            with open(path, "w") as fh:
+                fh.write(f"ebay:\n  client_id: {self.GOOD_ID}\n  client_secret: {self.GOOD_SECRET}\n"
+                         "items:\n  - {name: X, query: x}\n")
+            old = os.environ.get("EBAY_CLIENT_ID")
+            os.environ["EBAY_CLIENT_ID"] = "stale-value"
+            try:
+                cfg = load_config(path)
+            finally:
+                if old is None:
+                    del os.environ["EBAY_CLIENT_ID"]
+                else:
+                    os.environ["EBAY_CLIENT_ID"] = old
+            self.assertEqual(cfg.client_id, "stale-value")
+            self.assertIn("environment variable", cfg.client_id_source)
+            self.assertEqual(cfg.client_secret_source, "config.yaml")
+            self.assertIn("override config.yaml", " ".join(credential_problems(cfg)))
+
+    def test_mask_hides_middle(self):
+        self.assertEqual(mask(self.GOOD_SECRET), "PRD-...3a4b (36 characters)")
+        self.assertEqual(mask(None), "(empty)")
+
+    def test_libressl_warning_is_silenced(self):
+        # A fresh interpreter: importing pricewatch must hide urllib3's LibreSSL warning.
+        code = "import pricewatch, warnings; warnings.warn('urllib3 v2 only supports OpenSSL 1.1.1+')"
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run([sys.executable, "-c", code], cwd=here, capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0)
+        self.assertNotIn("OpenSSL", out.stderr)
+
+
 class OutputEncodingTest(unittest.TestCase):
     """Windows writes redirected output in cp1252, which has no sparkline characters."""
 
@@ -275,6 +327,11 @@ class FakeSession:
         return FakeResp(200, {"total": self.total, "itemSummaries": items})
 
 
+class RejectingSession(FakeSession):
+    def post(self, url, **kw):
+        return FakeResp(401, {"error": "invalid_client", "error_description": "client authentication failed"})
+
+
 class EbayClientTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -304,6 +361,14 @@ class EbayClientTest(unittest.TestCase):
             params["filter"],
             "buyingOptions:{FIXED_PRICE},conditionIds:{3000|1500},price:[150..900],priceCurrency:USD",
         )
+
+    def test_invalid_client_explains_causes(self):
+        from pricewatch.ebay import EbayAuthError
+        client = EbayClient(self.cfg, session=RejectingSession(total=0))
+        with self.assertRaises(EbayAuthError) as ctx:
+            client.token()
+        self.assertIn("Account Deletion", str(ctx.exception))
+        self.assertIn("Cert ID", str(ctx.exception))
 
     def test_pagination_and_cheap_pass(self):
         sess = FakeSession(total=1000)

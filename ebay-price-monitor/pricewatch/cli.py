@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from . import notify
-from .config import load_config
+from .config import AppConfig, credential_problems, load_config, mask
 from .ebay import EbayClient, EbayError
 from .monitor import run_item
 from .report import SOLD_FOOTNOTE, export_csv, format_history, format_scan
@@ -25,8 +25,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     store = Store(cfg.database)
     try:
         client = EbayClient(cfg)
+        client.token()
     except EbayError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        for p in credential_problems(cfg):
+            print(f"  ! {p}", file=sys.stderr)
+        store.close()
         return 2
 
     failures = 0
@@ -72,8 +76,22 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_credentials(cfg: AppConfig) -> list[str]:
+    print(f"marketplace:   {cfg.marketplace}{'  (sandbox)' if cfg.sandbox else ''}")
+    print(f"client_id:     {mask(cfg.client_id)}  from {cfg.client_id_source}")
+    print(f"client_secret: {mask(cfg.client_secret)}  from {cfg.client_secret_source}")
+    problems = credential_problems(cfg)
+    for p in problems:
+        print(f"  ! {p}")
+    if not problems:
+        print("  keys look well-formed")
+    print()
+    return problems
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
+    _print_credentials(cfg)
     try:
         client = EbayClient(cfg)
         client.token()

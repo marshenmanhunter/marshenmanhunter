@@ -153,6 +153,9 @@ class AppConfig:
     marketplace: str = "EBAY_US"
     client_id: str | None = None
     client_secret: str | None = None
+    client_id_source: str = "not set"
+    client_secret_source: str = "not set"
+    env_overrides_file: bool = False
     sandbox: bool = False
     ship_to_country: str | None = None
     ship_to_zip: str | None = None
@@ -206,12 +209,18 @@ def load_config(path: str | Path) -> AppConfig:
         db = path.parent / db
 
     ship_to = ebay.get("ship_to") or {}
+    cid, cid_src = _credential("EBAY_CLIENT_ID", ebay.get("client_id"))
+    sec, sec_src = _credential("EBAY_CLIENT_SECRET", ebay.get("client_secret"))
+    file_has_keys = bool(ebay.get("client_id") or ebay.get("client_secret"))
     return AppConfig(
         items=items,
         database=str(db),
         marketplace=ebay.get("marketplace", "EBAY_US"),
-        client_id=os.environ.get("EBAY_CLIENT_ID") or ebay.get("client_id"),
-        client_secret=os.environ.get("EBAY_CLIENT_SECRET") or ebay.get("client_secret"),
+        client_id=cid,
+        client_secret=sec,
+        client_id_source=cid_src,
+        client_secret_source=sec_src,
+        env_overrides_file=file_has_keys and "environment" in (cid_src + sec_src),
         sandbox=bool(ebay.get("sandbox", False)),
         ship_to_country=ship_to.get("country"),
         ship_to_zip=str(ship_to["zip"]) if ship_to.get("zip") else None,
@@ -219,3 +228,61 @@ def load_config(path: str | Path) -> AppConfig:
         ntfy_server=notify.get("ntfy_server", "https://ntfy.sh").rstrip("/"),
         discord_webhook=os.environ.get("PRICEWATCH_DISCORD_WEBHOOK") or notify.get("discord_webhook") or None,
     )
+
+
+def _credential(env_name: str, file_value) -> tuple[str | None, str]:
+    """Environment variable wins over config.yaml. Returns (value, where it came from)."""
+    env = os.environ.get(env_name)
+    if env:
+        return env, f"environment variable {env_name}"
+    if file_value not in (None, ""):
+        return str(file_value), "config.yaml"
+    return None, "not set"
+
+
+PLACEHOLDER_MARKERS = ("xxxxxxxx", "YourApp")
+QUOTE_CHARS = "\"'\u201c\u201d\u2018\u2019"
+
+
+def mask(value: str | None) -> str:
+    if not value:
+        return "(empty)"
+    if len(value) <= 10:
+        return f"({len(value)} characters)"
+    return f"{value[:4]}...{value[-4:]} ({len(value)} characters)"
+
+
+def credential_problems(cfg: AppConfig) -> list[str]:
+    """Likely reasons eBay would reject these keys, found without calling eBay."""
+    cid, sec = cfg.client_id or "", cfg.client_secret or ""
+    probs = []
+    if cfg.env_overrides_file:
+        probs.append(
+            "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET are set in this terminal and override config.yaml. "
+            "Open a new terminal window, or run: unset EBAY_CLIENT_ID EBAY_CLIENT_SECRET"
+        )
+    for label, v in (("client_id", cid), ("client_secret", sec)):
+        if not v:
+            probs.append(f"{label} is empty.")
+            continue
+        if any(m in v for m in PLACEHOLDER_MARKERS):
+            probs.append(f"{label} is still the example placeholder. Paste your real key.")
+        if any(c in v for c in QUOTE_CHARS) or any(c.isspace() for c in v):
+            probs.append(f"{label} contains quotes or spaces. Paste the bare key with nothing around it.")
+    if cid and cid == sec:
+        probs.append("client_id and client_secret are identical. They are two different keys.")
+    if not cfg.sandbox and cid and sec:
+        if "-SBX-" in cid.upper() or sec.upper().startswith("SBX-"):
+            probs.append(
+                "these look like Sandbox keys (SBX). Sandbox keys only work on eBay's test site. "
+                "Copy the keys from the Production column instead."
+            )
+        else:
+            if "-PRD-" not in cid.upper():
+                probs.append("client_id should be the App ID (Client ID). Production App IDs contain -PRD-.")
+            if not sec.upper().startswith("PRD-"):
+                probs.append(
+                    "client_secret should be the Cert ID (Client Secret). Production Cert IDs start with PRD-. "
+                    "A common mix-up is pasting the Dev ID here."
+                )
+    return probs

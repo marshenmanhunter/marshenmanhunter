@@ -22,6 +22,21 @@ class EbayError(RuntimeError):
     pass
 
 
+class EbayAuthError(EbayError):
+    pass
+
+
+AUTH_HELP = """eBay rejected your keys (invalid_client). The usual causes, most common first:
+  1. Production keyset still disabled. eBay switches it on only after the Marketplace
+     Account Deletion step. On developer.ebay.com > Application Keys, look for a notice
+     beside your Production keyset and complete it (the exemption option fits this tool).
+  2. Wrong value pasted. client_id = App ID (Client ID). client_secret = Cert ID
+     (Client Secret). The Dev ID goes nowhere.
+  3. Sandbox keys. Copy from the Production column, not Sandbox.
+  4. A brand-new or just-enabled keyset. Wait a few minutes and try again.
+Run "python -m pricewatch check" to see which keys this tool read and where from."""
+
+
 @dataclass
 class SearchResult:
     total: int
@@ -61,6 +76,8 @@ class EbayClient:
             data={"grant_type": "client_credentials", "scope": SCOPE},
             timeout=30,
         )
+        if resp.status_code == 401 and "invalid_client" in resp.text:
+            raise EbayAuthError(AUTH_HELP)
         if resp.status_code != 200:
             raise EbayError(f"token request failed ({resp.status_code}): {resp.text[:300]}")
         body = resp.json()
