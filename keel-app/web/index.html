@@ -251,7 +251,10 @@ textarea.input{height:auto;padding:8px 10px;resize:vertical}
 .alert-text small{display:block;color:var(--muted);font-size:12px;font-weight:400}
 
 /* Budget rows */
-.brow{display:grid;grid-template-columns:minmax(0,1.4fr) 116px minmax(0,.9fr) minmax(0,1.3fr);gap:14px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.bin{display:flex;gap:4px;min-width:0}
+.bin .money-in{flex:1;min-width:0}
+.bin select.per{width:60px;flex:none;height:32px;padding:0 4px;font-size:12.5px}
+.brow{display:grid;grid-template-columns:minmax(0,1.4fr) 172px minmax(0,.9fr) minmax(0,1.3fr);gap:14px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
 .brow.head{border-top:0;padding-top:2px;font-size:11.5px;font-family:var(--f-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
 .brow .bname{min-width:0;display:flex;align-items:center;gap:4px}
 .brow .bname>span{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
@@ -262,7 +265,7 @@ textarea.input{height:auto;padding:8px 10px;resize:vertical}
 .brow .money-in .input{height:32px}
 .brow .icon-btn{width:26px;height:26px}
 @media (max-width:640px){
-  .brow{grid-template-columns:minmax(0,1fr) 108px;row-gap:6px}
+  .brow{grid-template-columns:minmax(0,1fr) 164px;row-gap:6px}
   .brow .bnum{display:none}
   .brow .bprog{grid-column:1/-1}
   .brow.head{display:none}
@@ -560,14 +563,15 @@ const S = {
 };
 try { S.hide = localStorage.getItem('keel-hide') === '1'; } catch (e) {}
 let IX = null;
-const statsCache = new Map();
+const statsCache = new Map(), bStatsCache = new Map();
 function reindex() {
-  statsCache.clear();
+  statsCache.clear(); bStatsCache.clear();
   if (!S.settings) { IX = null; return; }
   IX = { cats: new Map(S.settings.categories.map(c => [c.id, c])), groups: new Map(S.settings.groups.map(g => [g.id, g])), accts: new Map(S.settings.accounts.map(a => [a.id, a])) };
   IX.all = Object.values(S.months).flat().sort((a, b) => b.date.localeCompare(a.date));
   IX.pool = poolIds();
   IX.internal = findInternalMoves(IX.pool);
+  IX.spread = buildSpread();
 }
 // Accounts treated as one pot of cash. Defaults to every checking, savings and cash account.
 function poolIds() {
@@ -831,6 +835,7 @@ function applyBankData(data, start) {
       const rule = ruleFor(merchant) || (st.description ? ruleFor(st.description) : null);
       const t = { id: newId('t'), date, merchant, amount, categoryId: rule ? rule.categoryId : (mccCat(st.mcc) || 'uncat'), accountId: ka.id, notes: '', extId };
       if (pend) t.pending = true;
+      const asp = autoSpreadMonths(t); if (asp >= 2) t.spread = asp;
       touched.add('m-' + insertTx(t)); addedIds.push(t.id); added++;
     }
     // Pending charges that vanished posted under a new id or were cancelled. Carry your edits to the posted one.
@@ -838,7 +843,7 @@ function applyBankData(data, start) {
     for (const t of existing) {
       if (!t.pending || !t.extId || !t.extId.startsWith(info.key + ':') || seen.has(t.extId) || t.date < startDate) continue;
       const repl = addedIds.map(findTx).find(n => n && n.accountId === ka.id && !n.pending && Math.abs(daysBetween(t.date, n.date)) <= 7 && Math.abs(n.amount - t.amount) <= Math.max(1, Math.abs(t.amount) * 0.25));
-      if (repl) { if (t.categoryId !== 'uncat') repl.categoryId = t.categoryId; for (const k of ['notes', 'shared', 'paidBy', 'reimb']) if (t[k]) repl[k] = t[k]; }
+      if (repl) { if (t.categoryId !== 'uncat') repl.categoryId = t.categoryId; for (const k of ['notes', 'shared', 'paidBy', 'reimb', 'spread']) if (t[k]) repl[k] = t[k]; }
       touched.add('m-' + removeTx(t)); removed++;
     }
   }
@@ -907,6 +912,40 @@ function monthStats(ym) {
   const r = { income: round2(income), expense: round2(expense), net: round2(income - expense), byCat };
   statsCache.set(ym, r); return r;
 }
+// Payments spread over several months: each month's budget counts an equal share, starting with the payment month.
+// Cash flow and balances still show the payment on the day it happened.
+function buildSpread() {
+  const out = new Map(), add = (ym, c, v) => { if (!out.has(ym)) out.set(ym, {}); const o = out.get(ym); o[c] = (o[c] || 0) + v; };
+  for (const t of IX.all) {
+    const n = Math.floor(+t.spread || 0); if (n < 2 || IX.internal.has(t.id) || typeOf(t.categoryId) !== 'expense') continue;
+    const total = eff(t); if (total >= 0) continue;
+    const ym = t.date.slice(0, 7), per = round2(total / n);
+    add(ym, t.categoryId, -total);
+    for (let k = 0; k < n; k++) add(addM(ym, k), t.categoryId, k < n - 1 ? per : round2(total - per * (n - 1)));
+  }
+  return out;
+}
+// Spending as the budget sees it: like monthStats, with spread payments shared across their months.
+function budgetStats(ym) {
+  if (bStatsCache.has(ym)) return bStatsCache.get(ym);
+  const base = monthStats(ym), adj = IX.spread && IX.spread.get(ym);
+  if (!adj) { bStatsCache.set(ym, base); return base; }
+  const byCat = { ...base.byCat }; let expense = base.expense;
+  for (const [c, v] of Object.entries(adj)) { byCat[c] = round2((byCat[c] || 0) + v); expense -= v; }
+  const r = { ...base, byCat, expense: round2(expense), net: round2(base.income - expense) };
+  bStatsCache.set(ym, r); return r;
+}
+// Spread payments in this category whose share lands in this month, with which month of the run it is.
+function spreadCovering(ym, catId) {
+  return IX.all.filter(t => t.categoryId === catId && +t.spread >= 2 && !IX.internal.has(t.id)).map(t => ({ t, k: monthsBetween(t.date.slice(0, 7), ym) + 1 })).filter(x => x.k >= 1 && x.k <= +x.t.spread);
+}
+// For categories set to spread on their own: a payment bigger than 1.5 months of budget covers amount / budget months.
+function autoSpreadMonths(t) {
+  const c = IX.cats.get(t.categoryId); if (!c || !c.autoSpread || t.amount >= 0) return 0;
+  const b = budgetFor(t.date.slice(0, 7)).map[c.id] || 0, a = -eff(t);
+  if (b <= 0 || a < b * 1.5) return 0;
+  return Math.min(60, Math.round(a / b));
+}
 const fullMonths = n => { const out = []; for (let i = 1; i <= n; i++) { const ym = addM(CUR, -i); if (S.months[ym]) out.push(ym); } return out; };
 function avgSpend(n) {
   const ms = fullMonths(n), k = ms.length || 1, byCat = {}; let total = 0, ess = 0, inc = 0;
@@ -921,7 +960,7 @@ function budgetFor(ym) {
 }
 function setBudget(ym, catId, amount) {
   const next = { ...budgetFor(ym).map };
-  if (amount > 0) next[catId] = round2(amount); else delete next[catId];
+  if (amount > 0) next[catId] = Math.round(amount * 1e6) / 1e6; else delete next[catId];
   S.settings.budgets = { ...S.settings.budgets, [ym]: next };
   changed('settings');
 }
@@ -929,7 +968,7 @@ function carryFor(cat, ym) {
   if (!cat.rollover) return 0;
   const start = cat.rolloverStart || ym; if (ym <= start) return 0;
   let c = 0;
-  for (let m = start; m < ym; m = addM(m, 1)) c += (budgetFor(m).map[cat.id] || 0) + (monthStats(m).byCat[cat.id] || 0);
+  for (let m = start; m < ym; m = addM(m, 1)) c += (budgetFor(m).map[cat.id] || 0) + (budgetStats(m).byCat[cat.id] || 0);
   return round2(c);
 }
 function balAt(a, ym) {
@@ -1133,7 +1172,7 @@ function runForecast(m, horizon, scn) {
   return rows;
 }
 function attention() {
-  const out = [], st = monthStats(CUR), b = budgetFor(CUR).map;
+  const out = [], st = budgetStats(CUR), b = budgetFor(CUR).map;
   const over = S.settings.categories.filter(c => { if (typeOf(c.id) !== 'expense') return false; const lim = (b[c.id] || 0) + carryFor(c, CUR); return lim > 0 && -(st.byCat[c.id] || 0) - lim > 0.5; });
   if (over.length) out.push({ sev: 'crit', icon: 'alert', text: `${over.length} ${over.length === 1 ? 'category is' : 'categories are'} over budget`, sub: esc(over.slice(0, 3).map(c => c.name).join(', ')), href: '#budget' });
   for (const x of trials().filter(x => !x.paidSince && x.left <= 3)) out.push({ sev: 'warn', icon: 'clock', text: `${esc(x.t.merchant)} trial ${x.left < 0 ? 'may have turned paid' : x.left === 0 ? 'turns paid today' : 'turns paid in ' + x.left + ' day' + (x.left === 1 ? '' : 's')}`, sub: 'Cancel before ' + dShort(x.converts) + ' if you do not want it', href: '#recurring' });
@@ -1296,6 +1335,7 @@ function txTags(t) {
   if (t.reimb) out.push(t.reimb.status === 'pending' ? `Owed by ${esc(t.reimb.from)}` : t.reimb.status === 'paid' ? 'Reimbursed' : 'Not reimbursed');
   if (t.reimbFor) out.push('Pays back an expense');
   if (t.pending) out.push('Pending');
+  if (+t.spread >= 2) out.push(`Spread over ${t.spread} months`);
   return out;
 }
 function txRow(t, compactRow) {
@@ -1338,7 +1378,7 @@ const VIEWS = {};
 const NAV = [['overview', 'Overview'], ['accounts', 'Accounts'], ['transactions', 'Transactions'], ['cash-flow', 'Cash flow'], ['forecast', 'Forecast'], ['budget', 'Budget'], ['recurring', 'Recurring'], ['goals', 'Goals'], ['settle-up', 'Settle up'], ['categories', 'Categories']];
 
 VIEWS.overview = () => {
-  const st = monthStats(CUR), prevYm = addM(CUR, -1);
+  const st = budgetStats(CUR), prevYm = addM(CUR, -1);
   const nw = netWorthAt(CUR), nwPrev = netWorthAt(prevYm), series = nwSeries(12);
   const bmap = budgetFor(CUR).map, expCats = S.settings.categories.filter(c => typeOf(c.id) === 'expense');
   const budTotal = sum(expCats, c => (bmap[c.id] || 0) + carryFor(c, CUR));
@@ -1554,7 +1594,7 @@ VIEWS.forecast = () => {
 };
 
 VIEWS.budget = () => {
-  const ym = S.ui.budMonth, bf = budgetFor(ym), b = bf.map, st = monthStats(ym), sm = S.settings.smoothing, sms = smoothingState();
+  const ym = S.ui.budMonth, bf = budgetFor(ym), b = bf.map, st = budgetStats(ym), sm = S.settings.smoothing, sms = smoothingState();
   const incCats = S.settings.categories.filter(c => typeOf(c.id) === 'income');
   const expGroups = S.settings.groups.filter(g => g.type === 'expense');
   const planIncRaw = sum(incCats, c => b[c.id] || 0), useSalary = sm.enabled && sms.salary !== null;
@@ -1562,14 +1602,20 @@ VIEWS.budget = () => {
   const expCats = S.settings.categories.filter(c => typeOf(c.id) === 'expense');
   const planExp = sum(expCats, c => b[c.id] || 0), spent = st.expense, left = round2(planInc - planExp);
   const av = avgSpend(3);
-  const moneyInput = c => `<span class="money-in"><input class="input" id="b-${c.id}" inputmode="decimal" data-change="budget" data-cat="${c.id}" value="${b[c.id] ? b[c.id] : ''}" placeholder="0"${can() ? '' : ' disabled'} aria-label="Budget for ${esc(c.name)}"></span>`;
+  const yearly = c => c.period === 'yearly';
+  const moneyInput = c => `<span class="bin"><span class="money-in"><input class="input" id="b-${c.id}" inputmode="decimal" data-change="budget" data-cat="${c.id}" value="${b[c.id] ? round2(b[c.id] * (yearly(c) ? 12 : 1)) : ''}" placeholder="0"${can() ? '' : ' disabled'} aria-label="${yearly(c) ? 'Yearly' : 'Monthly'} budget for ${esc(c.name)}"></span><select class="input per" id="bp-${c.id}" data-change="budget-period" data-cat="${c.id}" aria-label="Budget period for ${esc(c.name)}"${can() ? '' : ' disabled'}><option value="monthly"${yearly(c) ? '' : ' selected'}>/mo</option><option value="yearly"${yearly(c) ? ' selected' : ''}>/yr</option></select></span>`;
   const incRows = incCats.map(c => { const got = st.byCat[c.id] || 0, plan = b[c.id] || 0; return `<div class="brow"><span class="bname"><span>${esc(c.name)}</span></span>${moneyInput(c)}<span class="bnum amt">${money(got, true)}</span><div class="bprog"><div class="meter inc"><i style="width:${plan > 0 ? Math.min(100, got / plan * 100) : (got > 0 ? 100 : 0)}%"></i></div><small><span>${money(got, true)} received</span><span>${plan > 0 ? Math.round(got / plan * 100) + '%' : ''}</span></small></div></div>`; }).join('');
   const groupCards = expGroups.map(g => {
     const cats = S.settings.categories.filter(c => c.group === g.id); if (!cats.length) return '';
     const gb = sum(cats, c => (b[c.id] || 0) + carryFor(c, ym)), gs = -sum(cats, c => st.byCat[c.id] || 0);
     return `<div class="card"><div class="card-head"><h2>${esc(g.name)}</h2><span class="group-total num">${money(gs, true)} of ${money(gb, true)}</span></div><div class="card-body"><div class="brow head"><span>Category</span><span style="text-align:right">Budget</span><span class="bnum">Spent</span><span>Progress</span></div>${cats.map(c => {
       const s = round2(-(st.byCat[c.id] || 0)), carry = carryFor(c, ym), bb = (b[c.id] || 0) + carry;
-      const hint = c.rollover ? `Rollover ${Math.abs(carry) >= 0.5 ? signed(carry, true) : 'on'}` : av.byCat[c.id] > 1 ? `3-month avg ${money(av.byCat[c.id], true)}` : '';
+      const cov = spreadCovering(ym, c.id), parts = [];
+      if (c.rollover) parts.push(`Rollover ${Math.abs(carry) >= 0.5 ? signed(carry, true) : 'on'}`);
+      if (cov.length) parts.push(cov.length === 1 ? `Month ${cov[0].k} of ${cov[0].t.spread} of a ${money(-eff(cov[0].t), true)} payment` : `${cov.length} spread payments`);
+      if (yearly(c) && b[c.id]) parts.push(`${money(b[c.id], true)} a month`);
+      if (!parts.length && av.byCat[c.id] > 1) parts.push(`3-month avg ${money(av.byCat[c.id], true)}`);
+      const hint = parts.join(' · ');
       return `<div class="brow"><span class="bname">${can() ? `<button class="icon-btn" data-act="toggle-roll" data-id="${c.id}" aria-pressed="${!!c.rollover}" title="${c.rollover ? 'Rollover is on. Leftover money carries into next month.' : 'Turn on rollover'}" aria-label="Rollover for ${esc(c.name)}">${ic('roll')}</button>` : ''}<span>${esc(c.name)}${hint ? `<small>${hint}</small>` : ''}</span></span>${moneyInput(c)}<span class="bnum amt">${money(s, true)}</span><div class="bprog">${meterHtml(s, bb)}<small><span>${bb > 0 ? (s - bb > 0.5 ? `<span class="amt neg">${money(s - bb, true)} over</span>` : money(bb - s, true) + ' left') : (s > 0 ? money(s, true) + ' spent, no budget' : 'No budget')}</span><span>${bb > 0 ? Math.round(s / bb * 100) + '%' : ''}</span></small></div></div>`;
     }).join('')}</div></div>`;
   }).join('');
@@ -1586,7 +1632,7 @@ VIEWS.budget = () => {
       ${can() ? `<form id="smooth-form" class="f2" style="align-items:end"><label class="field"><span>Starting buffer</span><span class="money-in"><input class="input" name="startBuffer" inputmode="decimal" value="${sm.startBuffer || ''}" placeholder="Set aside for lean months"></span></label><div style="display:flex;gap:8px;justify-content:flex-end">${sm.enabled ? '<button class="btn" type="submit">Save</button><button class="btn quiet" type="button" data-act="smooth-off">Turn off</button>' : '<button class="btn primary" type="submit">Turn on</button>'}</div></form>` : ''}
       ${!sm.enabled ? '<p style="font-size:12.5px;color:var(--muted)">When on, your budget plans around this salary in place of the income you expect.</p>' : ''}
     </div></div>`;
-  const acts = btn('bud-fill', 'Fill empty from averages', 'sm', '') + btn('export-budget', 'Export budget', 'sm quiet', 'download');
+  const acts = btn('bud-fill', 'Fill empty from averages', 'sm', '') + `<a class="btn sm quiet" href="#categories">Organize categories</a>` + btn('export-budget', 'Export budget', 'sm quiet', 'download');
   return `<div class="wrap">${head('Budget', mLong(ym), stepper)}${sampleBanner()}${carried}
     <div class="tiles"><div class="tile"><span class="tile-label">${useSalary ? 'Your salary' : 'Expected income'}</span><span class="tile-value">${money(planInc, true)}</span><span class="tile-sub">${money(gotInc, true)} received</span></div><div class="tile"><span class="tile-label">Budgeted spending</span><span class="tile-value">${money(planExp, true)}</span><span class="tile-sub">${expCats.filter(c => b[c.id] > 0).length} categories</span></div><div class="tile"><span class="tile-label">Spent so far</span><span class="tile-value">${money(spent, true)}</span><span class="tile-sub">${planExp > 0 ? statusChip(spent, planExp) : 'Set budgets below'}</span></div><div class="tile"><span class="tile-label">Left to budget</span><span class="tile-value"${left < 0 ? ' style="color:var(--neg)"' : ''}>${money(left, true)}</span><span class="tile-sub">${left < 0 ? `<span class="chip crit">${ic('alert')}Budget exceeds income</span>` : left > 0.5 ? 'Assign it or save it' : `<span class="chip ok">${ic('check')}Every dollar has a job</span>`}</span>${explain([[useSalary ? 'Salary' : 'Expected income', money(planInc)], ['Budgeted spending', money(-planExp)], ['Left to budget', money(left), true]], 'Rollover amounts are not new money, so they stay out of this number.')}</div></div>
     <div class="page-head" style="margin-top:-4px"><p class="note">Shared costs count at your share. Pending reimbursements do not count as spending. Select the ${ic('roll')} button on a category to roll its leftover money into next month.</p><div class="head-actions">${acts}</div></div>
@@ -1672,9 +1718,12 @@ VIEWS['settle-up'] = () => {
 
 VIEWS.categories = () => {
   const counts = {}; for (const t of IX.all) counts[t.categoryId] = (counts[t.categoryId] || 0) + 1;
-  const groups = S.settings.groups.map(g => {
+  const G = S.settings.groups;
+  const mv = (act, id, dir, label, off) => can() ? `<button class="icon-btn" id="${act}-${id}-${dir}" data-act="${act}" data-id="${id}" data-dir="${dir}" aria-label="${label}"${off ? ' disabled style="opacity:.3"' : ''}>${ic(dir < 0 ? 'up' : 'down')}</button>` : '';
+  const groups = G.map((g, gi) => {
     const cats = S.settings.categories.filter(c => c.group === g.id);
-    return `<div class="card"><div class="card-head"><div><h2>${esc(g.name)}</h2><p>${g.type === 'income' ? 'Counts as income' : g.type === 'transfer' ? 'Left out of cash flow and budgets' : 'Counts as spending. Mark the ones you cannot cut as essential.'}</p></div>${btn('add-category', 'Add', 'sm', 'plus', ` data-group="${g.id}"`)}</div><div class="card-body"><div class="rows">${cats.map(c => `<div class="row"><div class="row-main"><div class="row-title">${esc(c.name)}</div><div class="row-sub">${counts[c.id] || 0} transactions</div></div>${g.type === 'expense' ? `<button class="chip ${c.essential ? 'ok' : ''}" style="border:0;cursor:pointer" data-act="toggle-ess" data-id="${c.id}" aria-pressed="${!!c.essential}" aria-label="${esc(c.name)} is ${c.essential ? 'essential' : 'optional'}"${can() ? '' : ' disabled'}>${c.essential ? ic('check') + 'Essential' : 'Optional'}</button>` : ''}${can() && !LOCKED.has(c.id) ? `<button class="icon-btn" data-act="edit-category" data-id="${c.id}" aria-label="Edit ${esc(c.name)}">${ic('edit')}</button>` : ''}</div>`).join('') || '<div class="empty">No categories in this group.</div>'}</div></div></div>`;
+    const desc = g.type === 'income' ? 'Counts as income' : g.type === 'transfer' ? 'Left out of cash flow and budgets' : 'Counts as spending. Mark the ones you cannot cut as essential.';
+    return `<div class="card"><div class="card-head"><div style="min-width:0;flex:1"><h2>${esc(g.name)}</h2><p>${desc}</p></div><div class="head-actions" style="gap:2px">${mv('group-move', g.id, -1, 'Move ' + esc(g.name) + ' up', gi === 0)}${mv('group-move', g.id, 1, 'Move ' + esc(g.name) + ' down', gi === G.length - 1)}${can() && g.type !== 'transfer' ? `<button class="icon-btn" data-act="edit-group" data-id="${g.id}" aria-label="Rename ${esc(g.name)}">${ic('edit')}</button>` : ''}${btn('add-category', 'Add', 'sm', 'plus', ` data-group="${g.id}"`)}</div></div><div class="card-body"><div class="rows">${cats.map((c, ci) => `<div class="row"><div style="display:flex;flex-direction:column">${mv('cat-move', c.id, -1, 'Move ' + esc(c.name) + ' up', ci === 0)}${mv('cat-move', c.id, 1, 'Move ' + esc(c.name) + ' down', ci === cats.length - 1)}</div><div class="row-main"><div class="row-title">${esc(c.name)}</div><div class="row-sub">${counts[c.id] || 0} transactions${c.period === 'yearly' ? ' · yearly budget' : ''}${c.autoSpread ? ' · spreads big payments' : ''}</div></div>${g.type === 'expense' ? `<button class="chip ${c.essential ? 'ok' : ''}" style="border:0;cursor:pointer" data-act="toggle-ess" data-id="${c.id}" aria-pressed="${!!c.essential}" aria-label="${esc(c.name)} is ${c.essential ? 'essential' : 'optional'}"${can() ? '' : ' disabled'}>${c.essential ? ic('check') + 'Essential' : 'Optional'}</button>` : ''}${can() && !LOCKED.has(c.id) ? `<button class="icon-btn" data-act="edit-category" data-id="${c.id}" aria-label="Edit ${esc(c.name)}">${ic('edit')}</button>` : ''}</div>`).join('') || '<div class="empty">No categories in this group. Add one, or move one here from its edit button.</div>'}</div></div></div>`;
   }).join('');
   const rules = S.settings.rules;
   const rulesCard = `<div class="card"><div class="card-head"><div><h2>Rules</h2><p>Merchants containing this text get this category automatically</p></div>${rules.length && can() ? `<button class="btn sm" data-act="apply-rules">Apply to uncategorized</button>` : ''}</div><div class="card-body"><div class="rows">${rules.length ? rules.map(r => `<div class="row"><div class="row-main"><div class="row-title">“${esc(r.match)}”</div><div class="row-sub">becomes ${esc(catName(r.categoryId))}</div></div>${can() ? `<button class="icon-btn" data-act="del-rule" data-id="${r.id}" aria-label="Delete rule">${ic('trash')}</button>` : ''}</div>`).join('') : '<div class="empty">No rules yet. Add one below, or tick “Always use this category” when you edit a transaction.</div>'}</div>
@@ -1686,7 +1735,7 @@ VIEWS.categories = () => {
     ${can() ? `<label class="field"><span>Restore from a JSON backup</span><input class="input" type="file" accept=".json,application/json" data-change="restore-file" style="padding-top:6px"><small>Replaces everything here with the backup's contents.</small></label>` : ''}
     ${restoring ? `<div class="banner warn"><p><b>Replace all data with ${esc(S._restore.name)}?</b> It holds ${S._restore.count} transactions and ${S._restore.settings.accounts ? S._restore.settings.accounts.length : 0} accounts.</p><div class="acts"><button class="btn quiet" data-act="cancel-confirm">Cancel</button><button class="btn danger" data-act="restore-apply">Replace everything</button></div></div>` : ''}
     <div class="chips">${can() ? (confirming ? `<button class="btn quiet" data-act="cancel-confirm">Cancel</button><button class="btn danger" data-act="reset-all">Delete everything for good</button>` : `<button class="btn quiet" data-act="ask-reset" style="color:var(--crit)">${ic('trash')}Delete all data</button>`) : ''}</div></div></div>`;
-  return `<div class="wrap">${head('Categories', S.settings.categories.length + ' categories in ' + S.settings.groups.length + ' groups')}${sampleBanner()}<div class="grid g-half" style="align-items:start"><div class="col">${groups}</div><div class="col">${rulesCard}${dataCard}</div></div></div>`;
+  return `<div class="wrap">${head('Categories', S.settings.categories.length + ' categories in ' + S.settings.groups.length + ' groups')}${sampleBanner()}<div class="grid g-half" style="align-items:start"><div class="col">${groups}${can() ? `<div><button class="btn" data-act="add-group">${ic('plus')}Add group</button></div>` : ''}</div><div class="col">${rulesCard}${dataCard}</div></div></div>`;
 };
 
 function viewLoading() {
@@ -1755,6 +1804,7 @@ function renderModal(focus) {
         <div class="who-reimb f2"${who === 'reimb' ? '' : ' hidden'}><label class="field"><span>Who owes you</span><input class="input" name="rfrom" value="${esc(t.reimb ? t.reimb.from : '')}" placeholder="Employer, HSA, a friend"></label><label class="field"><span>Amount owed back</span><span class="money-in"><input class="input" name="ramt" inputmode="decimal" value="${t.reimb ? t.reimb.amount : ''}" placeholder="Full amount"></span></label></div>
       </fieldset>
       <label class="field"><span>Notes</span><input class="input" name="notes" value="${esc(t.notes)}"></label>
+      <label class="field"><span>Spread over</span><span style="display:flex;gap:8px;align-items:center"><input class="input" name="spread" inputmode="numeric" value="${+t.spread >= 2 ? t.spread : ''}" placeholder="1" style="max-width:90px" aria-label="Months to spread over"><span class="note">months</span></span><small>For one payment that covers several months, like 6 months of insurance. Each month's budget counts an equal share, starting with this month.</small></label>
       <label class="check"><input type="checkbox" name="rule"> <span>Always use this category for this merchant, including past transactions</span></label>
       <label class="check"><input type="checkbox" name="adjust"${m.data.partnerPaid ? '' : ' checked'}> <span>Update the account balance by this amount</span></label>`;
   } else if (m.type === 'account') {
@@ -1784,7 +1834,14 @@ function renderModal(focus) {
   } else if (m.type === 'category') {
     const c = m.data.cat || { name: '', group: m.data.group || 'everyday', essential: false };
     title = m.data.cat ? 'Edit category' : 'Add category'; del = !!m.data.cat;
-    body = `<label class="field"><span>Name</span><input class="input" name="name" required value="${esc(c.name)}"></label><label class="field"><span>Group</span><select class="input" name="group">${S.settings.groups.map(g => `<option value="${g.id}"${c.group === g.id ? ' selected' : ''}>${esc(g.name)}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="essential"${c.essential ? ' checked' : ''}> <span>Essential. Counts toward your emergency runway.</span></label>${m.data.cat ? '<small style="color:var(--muted)">Deleting moves its transactions to Uncategorized.</small>' : ''}`;
+    body = `<label class="field"><span>Name</span><input class="input" name="name" required value="${esc(c.name)}"></label><label class="field"><span>Group</span><select class="input" name="group">${S.settings.groups.map(g => `<option value="${g.id}"${c.group === g.id ? ' selected' : ''}>${esc(g.name)}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="essential"${c.essential ? ' checked' : ''}> <span>Essential. Counts toward your emergency runway.</span></label>
+      <label class="field"><span>Enter its budget</span><select class="input" name="period"><option value="monthly"${c.period === 'yearly' ? '' : ' selected'}>Per month</option><option value="yearly"${c.period === 'yearly' ? ' selected' : ''}>Per year</option></select><small>A yearly amount is split evenly across the 12 months.</small></label>
+      <label class="check"><input type="checkbox" name="autoSpread"${c.autoSpread ? ' checked' : ''}> <span>Spread big payments over the months they cover. Paying $900 when the budget is $150 a month counts $150 in each of the next 6 months. Includes payments from the last 12 months.</span></label>
+      ${m.data.cat ? '<small style="color:var(--muted)">Deleting moves its transactions to Uncategorized.</small>' : ''}`;
+  } else if (m.type === 'group') {
+    const g = m.data.grp || { name: '', type: 'expense' }, used = m.data.grp ? S.settings.categories.filter(c => c.group === g.id).length : 0;
+    title = m.data.grp ? 'Edit group' : 'Add group'; del = !!m.data.grp && !['income', 'transfers', 'other'].includes(g.id);
+    body = `<label class="field"><span>Group name</span><input class="input" name="name" required value="${esc(g.name)}" placeholder="e.g. Car, Kids, Side business"></label><label class="field"><span>Counts as</span><select class="input" name="type"><option value="expense"${g.type === 'expense' ? ' selected' : ''}>Spending</option><option value="income"${g.type === 'income' ? ' selected' : ''}>Income</option></select></label>${used ? `<small style="color:var(--muted)">${used} categor${used === 1 ? 'y is' : 'ies are'} in this group. Move ${used === 1 ? 'it' : 'them'} out before deleting the group.</small>` : ''}`;
   } else if (m.type === 'household') {
     title = 'Change split'; const hh = S.settings.household;
     body = `<div class="f2"><label class="field"><span>Partner's name</span><input class="input" name="partnerName" required value="${esc(hh.partnerName)}"></label><label class="field"><span>Your share of shared costs</span><span class="pct-in"><input class="input" name="split" inputmode="decimal" required value="${hh.split}"></span></label></div><small style="color:var(--muted)">The new split applies to every shared transaction, past ones included.</small><button type="button" class="btn quiet" data-act="household-off" style="align-self:flex-start;color:var(--crit)">Stop splitting costs</button>`;
@@ -1890,7 +1947,7 @@ async function offerFile(filename, text, title) {
 function budgetCSV() {
   const keys = Object.keys(S.settings.budgets).sort(), start = keys[0] || CUR, rows = [['Month', 'Group', 'Category', 'Budget', 'Rollover', 'Actual (your share)', 'Left']];
   for (let ym = start; ym <= CUR; ym = addM(ym, 1)) {
-    const b = budgetFor(ym).map, st = monthStats(ym);
+    const b = budgetFor(ym).map, st = budgetStats(ym);
     for (const c of S.settings.categories) {
       if (typeOf(c.id) === 'transfer') continue;
       const carry = carryFor(c, ym), bud = b[c.id] || 0, sp = typeOf(c.id) === 'income' ? (st.byCat[c.id] || 0) : -(st.byCat[c.id] || 0);
@@ -1986,6 +2043,17 @@ document.addEventListener('click', async e => {
     case 'bank-disconnect': await Bank.disconnect(); S.confirm = null; S.settings.bank = { ...S.settings.bank, lastError: null, messages: [], found: [] }; changed('settings'); toast('Bank disconnected. Your imported transactions stay.'); break;
     case 'update-install': if (hasUpdates()) window.keelNative.updates.install(); break;
     case 'update-check': if (hasUpdates()) { S.update = { ...(S.update || {}), status: 'checking' }; render(); window.keelNative.updates.check(); } break;
+    case 'cat-move': {
+      const arr = [...S.settings.categories], i = arr.findIndex(x => x.id === id), dir = +el.dataset.dir; if (i < 0) break;
+      let j = i + dir; while (j >= 0 && j < arr.length && arr[j].group !== arr[i].group) j += dir;
+      if (j < 0 || j >= arr.length) break; [arr[i], arr[j]] = [arr[j], arr[i]]; S.settings.categories = arr; changed('settings'); break;
+    }
+    case 'group-move': {
+      const arr = [...S.settings.groups], i = arr.findIndex(x => x.id === id), j = i + (+el.dataset.dir);
+      if (i < 0 || j < 0 || j >= arr.length) break; [arr[i], arr[j]] = [arr[j], arr[i]]; S.settings.groups = arr; changed('settings'); break;
+    }
+    case 'add-group': openModal('group'); break;
+    case 'edit-group': { const g = S.settings.groups.find(x => x.id === id); if (g) openModal('group', { grp: { ...g } }); break; }
     case 'pool-toggle': S.settings.pool = { ...S.settings.pool, enabled: !S.settings.pool.enabled }; changed('settings'); toast(S.settings.pool.enabled ? 'Cash accounts combined. Moves between them are hidden.' : 'Cash accounts are separate again.'); break;
     case 'show-internal': Object.assign(S.ui, { q: '', fAcct: 'all', fCat: 'all', fMonth: 'all', fStatus: 'internal', limit: 150 }); location.hash = '#transactions'; break;
     case 'toggle-ess': { const c = S.settings.categories.find(x => x.id === id); if (c) { c.essential = !c.essential; changed('settings'); } break; }
@@ -2034,6 +2102,11 @@ function doDelete() {
     S.settings.accounts = S.settings.accounts.filter(a => a.id !== m.data.acct.id); changed('settings'); toast('Account removed. Its transactions stay.');
   } else if (m.type === 'recurring') { S.settings.recurring = S.settings.recurring.filter(r => r.id !== m.data.rec.id); changed('settings'); }
   else if (m.type === 'goal') { S.settings.goals = S.settings.goals.filter(g => g.id !== m.data.goal.id); changed('settings'); }
+  else if (m.type === 'group') {
+    const gid = m.data.grp.id;
+    if (S.settings.categories.some(c => c.group === gid)) { modalError('Move this group\'s categories to another group first.'); return; }
+    S.settings.groups = S.settings.groups.filter(g => g.id !== gid); changed('settings');
+  }
   else if (m.type === 'category') {
     const cid = m.data.cat.id; const touched = [];
     for (const ym in S.months) { let hit = false; for (const t of S.months[ym]) if (t.categoryId === cid) { t.categoryId = 'uncat'; hit = true; } if (hit) touched.push('m-' + ym); }
@@ -2050,7 +2123,8 @@ document.addEventListener('change', e => {
   if (k === 'acct-type') { const f = el.form, liab = !!(ATYPES[el.value] || {}).liab; f.querySelector('.liab-only').hidden = !liab; f.querySelector('.credit-only').hidden = el.value !== 'credit'; document.getElementById('bal-label').textContent = liab ? 'Amount owed' : 'Current balance'; return; }
   if (S.readOnly) return;
   if (k === 'tx-cat') { const t = findTx(el.dataset.id); if (t) { t.categoryId = el.value; changed('m-' + t.date.slice(0, 7)); } return; }
-  if (k === 'budget') { const v = parseMoney(el.value); setBudget(S.ui.budMonth, el.dataset.cat, v === null ? 0 : Math.abs(v)); return; }
+  if (k === 'budget') { const v = parseMoney(el.value), c = S.settings.categories.find(x => x.id === el.dataset.cat), amt = v === null ? 0 : Math.abs(v); setBudget(S.ui.budMonth, el.dataset.cat, c && c.period === 'yearly' ? amt / 12 : amt); return; }
+  if (k === 'budget-period') { const c = S.settings.categories.find(x => x.id === el.dataset.cat); if (c) { c.period = el.value === 'yearly' ? 'yearly' : 'monthly'; const mo = budgetFor(S.ui.budMonth).map[c.id] || 0; changed('settings'); toast(c.period === 'yearly' ? `${c.name}: enter a yearly amount.${mo ? ' ' + moneyT(mo * 12, true) + ' a year is ' + moneyT(mo, true) + ' a month.' : ''}` : `${c.name}: enter a monthly amount.`); } return; }
   if (k === 'payoff-extra') { const v = parseMoney(el.value); S.settings.payoff = { ...S.settings.payoff, extra: Math.max(0, Math.abs(v || 0)) }; changed('settings'); return; }
   if (k === 'bank-auto') { S.settings.bank = { ...S.settings.bank, autoSync: el.checked }; changed('settings'); return; }
   if (k === 'pool-acct') { const ids = new Set(poolChosen()); if (el.checked) ids.add(el.value); else ids.delete(el.value); if (!ids.size) { el.checked = true; toast('Keep at least one account in the pot.'); return; } S.settings.pool = { ...S.settings.pool, ids: [...ids] }; changed('settings'); return; }
@@ -2124,6 +2198,10 @@ document.addEventListener('submit', e => {
     if (who === 'shared') { next.shared = true; next.paidBy = str('paidBy') === 'partner' ? 'partner' : 'me'; if (next.paidBy === 'partner') { next.accountId = ''; adjust = false; } }
     if (who === 'reimb') { const ra = parseMoney(str('ramt')); next.reimb = { ...(prev && prev.reimb ? prev.reimb : { status: 'pending', since: next.date }), from: str('rfrom') || 'Someone', amount: round2(Math.min(Math.abs(ra || amt), Math.abs(amt))) }; }
     if (!prev && next.categoryId === 'uncat') { const r = ruleFor(next.merchant); if (r) next.categoryId = r.categoryId; }
+    const spIn = str('spread'), sp = parseInt(spIn, 10);
+    if (spIn && (isNaN(sp) || sp < 1 || sp > 60)) return modalError('Spread over takes a number of months from 1 to 60.');
+    if (sp >= 2 && sign < 0) next.spread = sp;
+    else if (!spIn && !prev) { const n = autoSpreadMonths(next); if (n >= 2) next.spread = n; }
     const docs = [];
     if (prev) { docs.push('m-' + removeTx(prev)); if (adjust && prev.accountId && adjustBal(prev.accountId, -prev.amount)) docs.push('settings'); }
     docs.push('m-' + insertTx(next)); if (adjust && adjustBal(next.accountId, next.amount)) docs.push('settings');
@@ -2168,8 +2246,23 @@ document.addEventListener('submit', e => {
   }
   if (m.type === 'category') {
     if (!str('name')) return modalError('Enter a name.');
-    if (m.data.cat) { const c = S.settings.categories.find(x => x.id === m.data.cat.id); if (c) { c.name = str('name'); c.group = str('group'); c.essential = fd.get('essential') === 'on'; } }
-    else S.settings.categories = [...S.settings.categories, { id: newId('c'), name: str('name'), group: str('group'), essential: fd.get('essential') === 'on' }];
+    const fields = { name: str('name'), group: str('group'), essential: fd.get('essential') === 'on', period: str('period') === 'yearly' ? 'yearly' : 'monthly', autoSpread: fd.get('autoSpread') === 'on' };
+    let c = m.data.cat ? S.settings.categories.find(x => x.id === m.data.cat.id) : null;
+    const turnedOn = fields.autoSpread && !(c && c.autoSpread);
+    if (c) Object.assign(c, fields); else { c = { id: newId('c'), ...fields }; S.settings.categories = [...S.settings.categories, c]; }
+    const docs = ['settings'];
+    if (turnedOn) {
+      reindex(); const since = addM(CUR, -12) + '-01'; let n = 0;
+      for (const t of IX.all) { if (t.categoryId !== c.id || t.spread || t.date < since) continue; const k = autoSpreadMonths(t); if (k >= 2) { t.spread = k; n++; docs.push('m-' + t.date.slice(0, 7)); } }
+      if (n) toast(`Spread ${n} past payment${n === 1 ? '' : 's'} in ${c.name}.`); else if (!(budgetFor(CUR).map[c.id] > 0)) toast(`Set a budget for ${c.name} so Keel knows how many months a payment covers.`);
+    }
+    closeModal(); changed(...docs); return;
+  }
+  if (m.type === 'group') {
+    if (!str('name')) return modalError('Name the group.');
+    const type = str('type') === 'income' ? 'income' : 'expense';
+    if (m.data.grp) { const g = S.settings.groups.find(x => x.id === m.data.grp.id); if (g) { g.name = str('name'); if (g.type !== 'transfer') g.type = type; } }
+    else { const tIdx = S.settings.groups.findIndex(g => g.type === 'transfer'), ng = { id: newId('g'), name: str('name'), type }, arr = [...S.settings.groups]; arr.splice(tIdx < 0 ? arr.length : tIdx, 0, ng); S.settings.groups = arr; }
     closeModal(); changed('settings'); return;
   }
   if (m.type === 'household') {
@@ -2196,7 +2289,7 @@ document.addEventListener('submit', e => {
   }
   if (m.type === 'import') {
     const list = m.data.ready || []; if (!list.length) return modalError('Nothing new to import. Check the column choices above.');
-    const docs = []; for (const t of list) docs.push('m-' + insertTx(t));
+    const docs = []; for (const t of list) { const n = autoSpreadMonths(t); if (n >= 2) t.spread = n; docs.push('m-' + insertTx(t)); }
     closeModal(); S.ui.fMonth = 'all'; changed(...docs); toast(`Imported ${list.length} transaction${list.length === 1 ? '' : 's'}.`); return;
   }
 });
