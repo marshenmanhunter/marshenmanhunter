@@ -1,9 +1,11 @@
 # Publishes a Keel release that installed apps update from.
-# To release: set "version" in keel-app/package.json, write keel-app/release-notes.md,
-# commit, then push a tag named v plus the version (for example v2.3.0).
+# To release: set "version" in keel-app/package.json, write keel-app/release-notes.md and commit.
+# Then either run this workflow from the Actions tab (Release Keel, Run workflow, pick the branch),
+# or push a tag named v plus the version (for example v2.4.0). The release tag is v plus the version.
 name: Release Keel
 
 on:
+  workflow_dispatch:
   push:
     tags: ['v*']
 
@@ -13,19 +15,27 @@ permissions:
 jobs:
   draft:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check the tag matches the app version
+      - id: version
+        name: Work out the release tag
         run: |
           VERSION=$(node -p "require('./keel-app/package.json').version")
-          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then echo "Tag $GITHUB_REF_NAME does not match app version $VERSION"; exit 1; fi
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then echo "Tag $GITHUB_REF_NAME does not match app version $VERSION"; exit 1; fi
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
       - name: Create a draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
-            --title "Keel ${GITHUB_REF_NAME#v}" --notes-file keel-app/release-notes.md
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null | grep -q false; then
+            echo "Release $TAG is already published. Raise the version in keel-app/package.json first."; exit 1
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "Keel ${TAG#v}" --notes-file keel-app/release-notes.md
 
   build:
     needs: draft
@@ -56,10 +66,11 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
   publish:
-    needs: build
+    needs: [draft, build]
     runs-on: ubuntu-latest
     steps:
       - name: Publish the release so installed apps see it
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          TAG: ${{ needs.draft.outputs.tag }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

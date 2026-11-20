@@ -39,9 +39,9 @@ After you install 2.3.0 or later, Keel checks for new versions when it opens and
 - The portable Windows exe works like the Mac: it tells you, then you download.
 - Categories, Your data shows your version and has a Check for updates button.
 
-To publish a release: change `version` in `package.json`, update `release-notes.md`, commit, and push a
-tag named `v` plus the version, for example `v2.3.0`. The Release Keel workflow builds both apps and
-publishes them.
+To publish a release: change `version` in `package.json`, update `release-notes.md` and commit. Then open
+the repository's Actions tab, choose **Release Keel → Run workflow** on your branch, or push a tag named
+`v` plus the version, for example `v2.4.0`. The workflow builds both apps and publishes them.
 
 ## Windows
 
