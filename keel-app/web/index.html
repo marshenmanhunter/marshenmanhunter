@@ -701,6 +701,12 @@ async function boot() {
   S.phase = S.settings ? 'ready' : 'empty';
   reindex(); renderStatus(); render();
   if (Bank.supported()) Bank.refreshStatus().then(() => { render(); maybeAutoSync(); });
+  if (hasUpdates()) {
+    // Re-render only when something visible changes, so download progress does not redraw the page constantly.
+    const take = st => { const prev = S.update || {}; S.update = st; if (prev.status !== st.status || prev.version !== st.version || Math.floor((prev.percent || 0) / 10) !== Math.floor((st.percent || 0) / 10)) render(); };
+    window.keelNative.updates.onChange(take);
+    window.keelNative.updates.status().then(take).catch(() => {});
+  }
 }
 function renderStatus() {
   const el = document.getElementById('save-status');
@@ -1301,8 +1307,22 @@ const amtHtml = t => {
   const pos = t.amount > 0 && typeOf(t.categoryId) !== 'transfer', e = eff(t), share = Math.abs(e - t.amount) > 0.004 && typeOf(t.categoryId) !== 'transfer';
   return `<span class="amt ${pos ? 'pos' : ''}">${t.amount > 0 ? signed(t.amount) : money(t.amount)}${share ? `<small>yours ${money(e)}</small>` : ''}</span>`;
 };
+// Desktop app updates. Only the Mac and Windows apps provide window.keelNative.updates.
+const hasUpdates = () => !!(window.keelNative && window.keelNative.updates);
+function updateBanner() {
+  const u = S.update; if (!u) return '';
+  if (u.status === 'ready') return `<div class="banner"><p><b>Keel ${esc(u.version)} is downloaded.</b> Restart to finish updating. Your data stays as it is.</p><div class="acts"><button class="btn primary" data-act="update-install">Restart now</button></div></div>`;
+  if (u.status === 'available') return `<div class="banner"><p><b>Keel ${esc(u.version)} is out.</b> You have ${esc(u.current)}. Download it and install it over this one. Your data stays as it is.</p><div class="acts"><button class="btn primary" data-act="update-install">Download</button></div></div>`;
+  if (u.status === 'downloading') return `<div class="banner"><p>Downloading Keel ${esc(u.version || '')}${u.percent ? ', ' + u.percent + '%' : ''}. Keep working, it installs when you restart.</p></div>`;
+  return '';
+}
+function updateStatusText() {
+  const u = S.update || {};
+  const m = { checking: 'Checking for updates…', current: 'You have the latest version.', downloading: 'Downloading the update…', ready: `Version ${esc(u.version || '')} is ready. Restart to install it.`, available: `Version ${esc(u.version || '')} is out.`, error: esc(u.message || 'Could not check for updates.'), dev: 'Update checks run in the installed app.' }[u.status];
+  return m || '';
+}
 function sampleBanner() {
-  let h = '';
+  let h = updateBanner();
   if (S.readOnly) h += `<div class="banner warn"><p><b>View only.</b> Your access to this page does not allow changes, so edits will not save.</p></div>`;
   if (S.settings && S.settings.sample && can()) {
     const confirming = S.confirm === 'clear-sample';
@@ -1661,6 +1681,7 @@ VIEWS.categories = () => {
     ${can() ? `<form id="rule-form" class="f2" style="margin-top:12px;align-items:end"><label class="field"><span>Merchant contains</span><input class="input" name="match" required placeholder="e.g. greenleaf"></label><label class="field"><span>Category</span><select class="input" name="categoryId">${catOptions('groceries')}</select></label><div style="grid-column:1/-1;display:flex;justify-content:flex-end"><button class="btn" type="submit">${ic('plus')}Add rule</button></div></form>` : ''}</div></div>`;
   const confirming = S.confirm === 'reset', restoring = S.confirm === 'restore' && S._restore;
   const dataCard = `<div class="card"><div class="card-head"><div><h2>Your data</h2><p>${Store.kind === 'db' ? 'Stored privately in your Claude account. Nobody else who opens this page can see it.' : Store.kind === 'local' ? 'Stored in this browser only.' : 'Not saved.'} You own it and can take all of it with you.</p></div></div><div class="card-body" style="display:flex;flex-direction:column;gap:12px">
+    ${hasUpdates() ? `<div class="row-line" style="padding:8px 10px;border-radius:var(--r-sm);background:var(--surface-2)"><span class="note">Keel ${esc((S.update && S.update.current) || '')}. ${updateStatusText()}</span><button class="btn sm" data-act="update-check">Check for updates</button></div>` : ''}
     <div style="display:flex;gap:8px;flex-wrap:wrap">${btn('export-csv', 'Transactions (CSV)', '', 'download')}${btn('export-budget', 'Budgets (CSV)', '', 'download')}${btn('export-json', 'Everything (JSON backup)', '', 'download')}</div>
     ${can() ? `<label class="field"><span>Restore from a JSON backup</span><input class="input" type="file" accept=".json,application/json" data-change="restore-file" style="padding-top:6px"><small>Replaces everything here with the backup's contents.</small></label>` : ''}
     ${restoring ? `<div class="banner warn"><p><b>Replace all data with ${esc(S._restore.name)}?</b> It holds ${S._restore.count} transactions and ${S._restore.settings.accounts ? S._restore.settings.accounts.length : 0} accounts.</p><div class="acts"><button class="btn quiet" data-act="cancel-confirm">Cancel</button><button class="btn danger" data-act="restore-apply">Replace everything</button></div></div>` : ''}
@@ -1881,7 +1902,7 @@ function budgetCSV() {
 }
 
 /* ---------- events ---------- */
-const READ_OK = ['modal-close', 'nw-range', 'cf-range', 'cf-month', 'bud-prev', 'bud-next', 'bud-today', 'tx-more', 'clear-filters', 'export-csv', 'export-json', 'export-budget', 'copy-text', 'copy-request', 'cancel-confirm', 'drill', 'show-uncat', 'fc-months', 'fc-reset', 'toggle-hide', 'show-internal'];
+const READ_OK = ['modal-close', 'nw-range', 'cf-range', 'cf-month', 'bud-prev', 'bud-next', 'bud-today', 'tx-more', 'clear-filters', 'export-csv', 'export-json', 'export-budget', 'copy-text', 'copy-request', 'cancel-confirm', 'drill', 'show-uncat', 'fc-months', 'fc-reset', 'toggle-hide', 'show-internal', 'update-install', 'update-check'];
 document.addEventListener('click', async e => {
   const el = e.target.closest('[data-act]'); if (!el) return;
   const act = el.dataset.act, id = el.dataset.id;
@@ -1963,6 +1984,8 @@ document.addEventListener('click', async e => {
     case 'bank-unlink': { const links = { ...S.settings.bank.links }; const k = el.dataset.k; if (links[k] && links[k] !== 'skip') links[k] = 'skip'; else delete links[k]; S.settings.bank = { ...S.settings.bank, links }; changed('settings'); if (!links[k]) toast('It will show up to match on the next sync.'); break; }
     case 'ask-bank-disconnect': S.confirm = 'bank-disconnect'; render(); break;
     case 'bank-disconnect': await Bank.disconnect(); S.confirm = null; S.settings.bank = { ...S.settings.bank, lastError: null, messages: [], found: [] }; changed('settings'); toast('Bank disconnected. Your imported transactions stay.'); break;
+    case 'update-install': if (hasUpdates()) window.keelNative.updates.install(); break;
+    case 'update-check': if (hasUpdates()) { S.update = { ...(S.update || {}), status: 'checking' }; render(); window.keelNative.updates.check(); } break;
     case 'pool-toggle': S.settings.pool = { ...S.settings.pool, enabled: !S.settings.pool.enabled }; changed('settings'); toast(S.settings.pool.enabled ? 'Cash accounts combined. Moves between them are hidden.' : 'Cash accounts are separate again.'); break;
     case 'show-internal': Object.assign(S.ui, { q: '', fAcct: 'all', fCat: 'all', fMonth: 'all', fStatus: 'internal', limit: 150 }); location.hash = '#transactions'; break;
     case 'toggle-ess': { const c = S.settings.categories.find(x => x.id === id); if (c) { c.essential = !c.essential; changed('settings'); } break; }

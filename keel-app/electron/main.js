@@ -1,9 +1,10 @@
 // Desktop shell for Keel. The whole app lives in web/; this file opens a window,
-// gives the page a native "Save as" dialog, and runs bank sync (see simplefin.js).
+// gives the page a native "Save as" dialog, runs bank sync (simplefin.js) and update checks (updates.js).
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
 const simplefin = require('./simplefin');
+const updates = require('./updates');
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
@@ -48,6 +49,10 @@ ipcMain.handle('keel:save-file', async (event, name, text) => {
   return { status: 'saved' };
 });
 
+ipcMain.handle('keel:update-status', () => updates.status());
+ipcMain.handle('keel:update-check', () => updates.check());
+ipcMain.handle('keel:update-install', () => updates.install());
+
 ipcMain.handle('keel:bank-status', () => simplefin.status());
 ipcMain.handle('keel:bank-claim', (event, token) => simplefin.claim(String(token || '')));
 ipcMain.handle('keel:bank-accounts', (event, p) => simplefin.accounts({ startDate: p && +p.startDate, balancesOnly: !!(p && p.balancesOnly) }));
@@ -58,6 +63,7 @@ app.on('second-instance', () => {
 });
 app.whenReady().then(() => {
   createWindow();
+  updates.start(state => { for (const w of BrowserWindow.getAllWindows()) w.webContents.send('keel:update', state); });
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

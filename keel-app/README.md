@@ -27,17 +27,33 @@ The connection key never goes into backups. The desktop app encrypts it with you
 Windows account. The web and iPhone versions keep it in that device's storage. SimpleFIN cannot move
 money, and Keel never sees your bank password.
 
+## Updates
+
+Get Keel from the [Releases page](https://github.com/marshenmanhunter/marshenmanhunter/releases/latest).
+After you install 2.3.0 or later, Keel checks for new versions when it opens and every 6 hours.
+
+- Windows (installed with Keel-Setup): new versions download in the background. A banner asks you to
+  restart, and Keel installs the update with your data untouched.
+- Mac: a banner says a new version is out and opens the download. Install it over the old one.
+  Updating silently on Mac requires a paid Apple Developer ID, so this step stays manual.
+- The portable Windows exe works like the Mac: it tells you, then you download.
+- Categories, Your data shows your version and has a Check for updates button.
+
+To publish a release: change `version` in `package.json`, update `release-notes.md`, commit, and push a
+tag named `v` plus the version, for example `v2.3.0`. The Release Keel workflow builds both apps and
+publishes them.
+
 ## Windows
 
-1. Download `Keel-Windows-2.2.0.zip`, or the `Keel-windows` build from GitHub Actions (see below).
+1. Download `Keel-Setup-2.3.0.exe` from the Releases page. Use the installer: it is the version that updates itself.
 2. Unzip it anywhere, open the folder and run `Keel.exe`. The Actions build also gives you
-   `Keel-Setup-2.2.0.exe`, a normal installer with a Start menu shortcut.
+   `Keel-Setup-2.3.0.exe`, a normal installer with a Start menu shortcut.
 3. Windows shows "Windows protected your PC" because the app is not code-signed. Click
    **More info → Run anyway**. A code-signing certificate removes this warning.
 
 ## Mac
 
-1. Download the `Keel-mac` build from GitHub Actions and open `Keel-2.2.0-universal.dmg`.
+1. Download `Keel-2.3.0-mac.dmg` from the Releases page and open it.
    It runs on both Apple Silicon and Intel Macs.
 2. Drag Keel into Applications.
 3. The first time, right-click Keel and choose **Open**, then **Open** again. If macOS still blocks it,

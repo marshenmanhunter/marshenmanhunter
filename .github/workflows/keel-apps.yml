@@ -1,4 +1,5 @@
-# Builds the Keel desktop apps on real Mac and Windows machines.
+# Test builds of the Keel desktop apps on real Mac and Windows machines. Nothing is published.
+# Releases that the installed apps update from come from keel-release.yml.
 # Run it from the Actions tab (Build Keel apps, Run workflow), or push a change under keel-app/.
 # Download the results from the run's Artifacts section.
 name: Build Keel apps
@@ -6,6 +7,7 @@ name: Build Keel apps
 on:
   workflow_dispatch:
   push:
+    branches: ['**']
     paths:
       - 'keel-app/**'
       - '.github/workflows/keel-apps.yml'

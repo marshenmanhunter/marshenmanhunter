@@ -1,0 +1,65 @@
+# Publishes a Keel release that installed apps update from.
+# To release: set "version" in keel-app/package.json, write keel-app/release-notes.md,
+# commit, then push a tag named v plus the version (for example v2.3.0).
+name: Release Keel
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches the app version
+        run: |
+          VERSION=$(node -p "require('./keel-app/package.json').version")
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then echo "Tag $GITHUB_REF_NAME does not match app version $VERSION"; exit 1; fi
+      - name: Create a draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "Keel ${GITHUB_REF_NAME#v}" --notes-file keel-app/release-notes.md
+
+  build:
+    needs: draft
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-latest
+            script: release:mac
+          - os: windows-latest
+            script: release:win
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: keel-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: keel-app/package-lock.json
+      - run: npm ci
+      - run: npm run build:web
+      - run: npm run ${{ matrix.script }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release so installed apps see it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
